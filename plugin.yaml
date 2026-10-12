@@ -1,0 +1,19 @@
+name: hermes-mail-notifier
+version: "0.1.0"
+description: "Read-only Naver, Daum, and Gmail monitoring with important-email summaries sent to Telegram."
+provides_tools:
+  - mail_notifier_check
+  - mail_notifier_status
+config_schema:
+  configuration:
+    type: dict
+    description: "Atomic settings snapshot. Manage with hermes mail-notifier setup; passwords are secret references only."
+    default:
+      accounts: []
+      schedule: "every 5m"
+      target: telegram
+      language: ko
+      important_senders: []
+      ignored_senders: []
+      important_keywords: []
+      importance_instructions: ""

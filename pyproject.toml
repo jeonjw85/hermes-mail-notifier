@@ -1,0 +1,11 @@
+[project]
+name = "hermes-mail-notifier"
+version = "0.1.0"
+description = "Important-email summaries for Hermes Agent and Telegram"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["mail_notifier*"]

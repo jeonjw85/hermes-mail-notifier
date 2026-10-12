@@ -1,5 +1,9 @@
 # Hermes Mail Notifier
 
+[![Tests](https://github.com/jeonjw85/hermes-mail-notifier/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jeonjw85/hermes-mail-notifier/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 English | [한국어](README.ko.md)
 
 A Hermes Agent plugin that **summarizes important new emails from Naver Mail, Daum Mail, and Gmail and sends them through your existing Telegram connection**. It supports multiple accounts and reuses the model and Telegram connection configured in Hermes.

@@ -170,20 +170,30 @@ class HermesHost:
             expected = {name: value for name in names if (value := get_secret(name))}
             if not expected:
                 return
+            # PM can attach Hermes and its dependencies outside sys.executable's
+            # site-packages. Carry those import paths, not the ambient secrets.
             probe = (
                 "import json,sys\n"
+                "request=json.load(sys.stdin)\n"
+                "sys.path[:]=request['sys_path']\n"
                 "from hermes_cli.env_loader import load_hermes_dotenv\n"
                 "from hermes_cli.send_cmd import _load_hermes_env\n"
                 "from agent.secret_scope import get_secret\n"
-                "expected=json.load(sys.stdin)\n"
+                "expected=request['expected']\n"
                 "load_hermes_dotenv()\n"
                 "_load_hermes_env()\n"
                 "print(json.dumps({'reloadable':all(get_secret(k)==v for k,v in expected.items())}))\n"
             )
-            result = subprocess.run([sys.executable, "-c", probe], input=json.dumps(expected),
+            request = {"expected": expected, "sys_path": sys.path}
+            result = subprocess.run([sys.executable, "-c", probe], input=json.dumps(request),
                                     env=self._child_env(), text=True, encoding="utf-8", capture_output=True,
                                     timeout=30, check=False)
-            if result.returncode or json.loads(result.stdout).get("reloadable") is not True:
+            if result.returncode:
+                raise HostError("credential_reload_check_failed")
+            response = json.loads(result.stdout)
+            if not isinstance(response, dict) or not isinstance(response.get("reloadable"), bool):
+                raise HostError("credential_reload_check_failed")
+            if not response["reloadable"]:
                 raise HostError("credentials_not_reloadable")
         except HostError:
             raise

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+import venv
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -117,6 +118,21 @@ class HermesContractTests(unittest.TestCase):
             self.host.check_environment(settings)
         save_env_value("OPENAI_API_KEY", "test-only-environment-key")
         self.host.check_environment(settings)
+
+    def test_credential_probe_with_host_dependencies_outside_interpreter(self):
+        import hermes_cli
+        from hermes_cli.config import save_env_value
+        runtime = self.root / "bare runtime"
+        venv.EnvBuilder(with_pip=False).create(runtime)
+        paths = [str(Path(hermes_cli.__file__).resolve().parents[1]), *sys.path]
+        settings = Settings(accounts=(self.account,))
+        os.environ["TELEGRAM_BOT_TOKEN"] = "test-only-environment-token"
+        with patch.object(sys, "executable", str(runtime / "bin" / "python")), patch.object(sys, "path", paths):
+            with self.assertRaises(HostError) as caught:
+                self.host.check_environment(settings)
+            self.assertEqual(caught.exception.code, "credentials_not_reloadable")
+            save_env_value("TELEGRAM_BOT_TOKEN", "test-only-environment-token")
+            self.host.check_environment(settings)
 
     def test_cron_list_create_update_pause_and_recover_id(self):
         script = self.home / "scripts/hermes-mail-notifier.py"

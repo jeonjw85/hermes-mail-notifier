@@ -145,9 +145,58 @@ class HermesHostTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "credentials_not_reloadable")
             self.assertNotIn("test-only-token", str(caught.exception))
             self.assertNotIn("test-only-token", repr(run.call_args.args[0]))
-            self.assertIn("MODEL_TEST_KEY", json.loads(run.call_args.kwargs["input"]))
+            self.assertIn("MODEL_TEST_KEY", json.loads(run.call_args.kwargs["input"])["expected"])
             run.return_value = subprocess.CompletedProcess([], 0, '{"reloadable": true}', "")
             self.host.check_environment(self.settings)
+
+    def test_environment_preflight_keeps_runtime_imports_without_inheriting_secrets(self):
+        # PM installs expose host code/dependencies through sys.path, not the
+        # interpreter's own site-packages. Exercise a real clean child process.
+        runtime = self.profile / "runtime packages"
+        sources = {
+            "hermes_cli/__init__.py": "",
+            "hermes_cli/env_loader.py": (
+                "import os\nfrom pathlib import Path\n"
+                "def load_hermes_dotenv():\n"
+                "    path = Path(os.environ['HERMES_HOME']) / '.env'\n"
+                "    if path.exists():\n"
+                "        for line in path.read_text().splitlines():\n"
+                "            key, value = line.split('=', 1)\n"
+                "            os.environ[key] = value\n"
+            ),
+            "hermes_cli/send_cmd.py": "def _load_hermes_env(): pass\n",
+            "agent/__init__.py": "",
+            "agent/secret_scope.py": "from os import environ\nget_secret = environ.get\n",
+        }
+        for name, source in sources.items():
+            path = runtime / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+        self.secrets[(str(self.profile), "TELEGRAM_BOT_TOKEN")] = "test-only-token"
+        config_module = sys.modules["hermes_cli.config"]
+        with patch.object(sys, "path", [str(runtime), *sys.path]), patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-only-token"}), patch.object(config_module, "load_config_readonly", return_value={}, create=True), patch.dict(sys.modules, {"hermes_cli.auth": types.SimpleNamespace(PROVIDER_REGISTRY={})}):
+            with self.assertRaises(self.module.HostError) as caught:
+                self.host.check_environment(self.settings)
+            self.assertEqual(caught.exception.code, "credentials_not_reloadable")
+            (self.profile / ".env").write_text("TELEGRAM_BOT_TOKEN=test-only-token\n", encoding="utf-8")
+            self.host.check_environment(self.settings)
+
+    def test_environment_preflight_distinguishes_probe_errors_from_missing_credentials(self):
+        self.secrets[(str(self.profile), "TELEGRAM_BOT_TOKEN")] = "test-only-token"
+        config_module = sys.modules["hermes_cli.config"]
+        results = [
+            subprocess.CompletedProcess([], 1, "", "ModuleNotFoundError: hermes_cli; test-only-token"),
+            subprocess.CompletedProcess([], 0, "not json", ""),
+            subprocess.CompletedProcess([], 0, '{}', ""),
+            subprocess.CompletedProcess([], 0, '{"reloadable": "false"}', ""),
+        ]
+        with patch.object(config_module, "load_config_readonly", return_value={}, create=True), patch.dict(sys.modules, {"hermes_cli.auth": types.SimpleNamespace(PROVIDER_REGISTRY={})}):
+            for result in results:
+                with self.subTest(result=result), patch.object(self.module.subprocess, "run", return_value=result):
+                    with self.assertRaises(self.module.HostError) as caught:
+                        self.host.check_environment(self.settings)
+                    self.assertEqual(caught.exception.code, "credential_reload_check_failed")
+                    self.assertNotIn("test-only-token", str(caught.exception))
 
     def test_send_requires_actual_delivery_evidence(self):
         invalid = [{"success": True}, {"success": True, "message_id": "9", "delivered": False},

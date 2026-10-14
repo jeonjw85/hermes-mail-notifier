@@ -10,10 +10,10 @@
 
 ## 설치
 
-이 프로젝트를 GitHub 저장소 루트에 올린 뒤, Hermes가 실행 중인 서버에서 설치합니다. `OWNER/REPOSITORY`를 실제 저장소 주소로 바꾸세요.
+Hermes가 실행 중인 서버에서 아래 명령으로 설치하세요.
 
 ```sh
-hermes plugins install OWNER/REPOSITORY --enable
+hermes plugins install jeonjw85/hermes-mail-notifier --enable
 ```
 
 최초 설정:

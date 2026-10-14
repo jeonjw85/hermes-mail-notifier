@@ -10,10 +10,10 @@ A Hermes Agent plugin that **summarizes important new emails from Naver Mail, Da
 
 ## Installation
 
-Publish this project at the root of a GitHub repository, then install it on the server running Hermes. Replace `OWNER/REPOSITORY` with your repository.
+Install the plugin on the server running Hermes:
 
 ```sh
-hermes plugins install OWNER/REPOSITORY --enable
+hermes plugins install jeonjw85/hermes-mail-notifier --enable
 ```
 
 Run the initial setup:

@@ -21,6 +21,14 @@ class MailContent:
     text: str
     truncated: bool
     needs_body_review: bool
+    to: str = ""
+    cc: str = ""
+    reply_to: str = ""
+    message_id: str = ""
+    in_reply_to: str = ""
+    list_id: str = ""
+    list_unsubscribe: str = ""
+    auto_submitted: str = ""
 
 
 def _decode(value: bytes, charset=None) -> str:
@@ -109,6 +117,7 @@ def parse_message(raw: bytes, *, truncated: bool = False) -> MailContent:
     truncated = truncated or len(raw) > MAX_RAW_BYTES
     raw = raw[:MAX_RAW_BYTES]
     parse_errors = (ValueError, UnicodeError, RecursionError, MessageError)
+    mail = None
     try:
         mail = BytesParser(policy=policy.compat32).parsebytes(raw)
         address, name, subject, date = _metadata(mail)
@@ -117,15 +126,21 @@ def parse_message(raw: bytes, *, truncated: bool = False) -> MailContent:
         # BytesParser can exhaust its recursion budget before our MIME depth
         # guard runs. Header-only parsing never descends into those MIME parts.
         try:
-            headers = BytesHeaderParser(policy=policy.compat32).parsebytes(raw)
-            address, name, subject, date = _metadata(headers)
+            mail = BytesHeaderParser(policy=policy.compat32).parsebytes(raw)
+            address, name, subject, date = _metadata(mail)
         except parse_errors:
             address, name, subject, date = "", "", "", ""
         text, incomplete = "", True
     text = text.strip()
     truncated = truncated or len(text) > MAX_BODY_CHARS
+    headers = {field: _header(mail.get(header))[:1000] if mail is not None else ""
+               for field, header in (("to", "To"), ("cc", "Cc"), ("reply_to", "Reply-To"),
+                                     ("message_id", "Message-ID"), ("in_reply_to", "In-Reply-To"),
+                                     ("list_id", "List-Id"), ("list_unsubscribe", "List-Unsubscribe"),
+                                     ("auto_submitted", "Auto-Submitted"))}
     return MailContent(
         sender_address=address, sender_name=name, subject=subject, date=date,
         text=text[:MAX_BODY_CHARS], truncated=truncated,
         needs_body_review=truncated or incomplete or not text,
+        **headers,
     )

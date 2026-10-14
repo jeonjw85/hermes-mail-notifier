@@ -1,5 +1,7 @@
 """Lazy adapters for the host's profile, secrets, model, cron, and messaging."""
 
+# Hermes modules are supplied by the host, not plugin runtime dependencies.
+# pyright: reportMissingImports=false
 import importlib
 import json
 import os
@@ -11,8 +13,8 @@ import tempfile
 from pathlib import Path
 
 from .config import PLUGIN_ID, Account, Settings, dump_settings, load_settings
-from .store import Store
-from .triage import TriageError
+from .store import StorageError, Store
+from .triage import ModelReply, TriageError
 
 _MARKER = "Managed by hermes-mail-notifier."
 _CHILD_ENV = frozenset({
@@ -97,22 +99,48 @@ class HermesHost:
             connection = plugin_db(PLUGIN_ID)
             (data / "data.db").chmod(0o600)
             try:
-                return Store(connection, data / "run.lock")
+                return Store(connection, data / "run.lock",
+                             migration_target=lambda: self.resolve_target(self.load_settings().target))
             except Exception:
                 connection.close()
                 raise
+        except (StorageError, HostError):
+            raise
         except Exception:
             raise HostError("storage_unavailable") from None
 
-    def complete_structured(self, payload: dict):
+    def complete_structured(self, payload: dict, *, timeout=45) -> ModelReply:
         try:
-            return self.ctx.llm.complete_structured(
-                **payload, timeout=45, max_tokens=1800, purpose="mail-notifier-triage",
-            ).parsed
+            result = self.ctx.llm.complete_structured(
+                **payload, timeout=timeout, max_tokens=1800, purpose="mail-notifier-triage",
+            )
+            usage = getattr(result, "usage", None)
+            values = {name: getattr(usage, name, None) for name in
+                      ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd")}
+            return ModelReply(result.parsed, values, getattr(result, "provider", ""), getattr(result, "model", ""))
         except ValueError:
             raise TriageError("invalid_model_output") from None
         except Exception:
             raise ModelUnavailable() from None
+
+    def resolve_target(self, target: str) -> str:
+        Settings(target=target)
+        if target != "telegram":
+            return target
+        try:
+            from hermes_cli.send_cmd import _load_hermes_env
+            from gateway.config import Platform, load_gateway_config
+            _load_hermes_env()
+            home = load_gateway_config().get_home_channel(Platform.TELEGRAM)
+            if home is None:
+                raise HostError("destination_unavailable")
+            resolved = f"telegram:{home.chat_id}"
+            if home.thread_id:
+                resolved += f":{home.thread_id}"
+            Settings(target=resolved)
+            return resolved
+        except Exception:
+            raise HostError("destination_unavailable") from None
 
     def _executable(self) -> str:
         executable = shutil.which("hermes")
@@ -200,14 +228,14 @@ class HermesHost:
         except Exception:
             raise HostError("credential_reload_check_failed") from None
 
-    def send(self, target: str, text: str) -> dict:
+    def send(self, target: str, text: str, *, timeout=30) -> dict:
         # Revalidate even when called outside the normal configuration path.
         Settings(target=target)
         try:
             result = subprocess.run(
                 [self._executable(), "send", "--to", target, "--file", "-", "--json"],
                 input=text, text=True, encoding="utf-8", capture_output=True,
-                env=self._child_env(), timeout=30, check=False,
+                env=self._child_env(), timeout=timeout, check=False,
             )
             payload = json.loads(result.stdout)
             if result.returncode or not isinstance(payload, dict) or payload.get("success") is not True:
@@ -226,6 +254,13 @@ class HermesHost:
             raise
         except Exception:
             raise DeliveryError() from None
+
+    def validate_schedule(self, schedule: str) -> None:
+        try:
+            from cron.jobs import parse_schedule
+            parse_schedule(schedule)
+        except Exception:
+            raise HostError("invalid_schedule") from None
 
     def manage_cron(self, action: str, **fields) -> dict:
         try:

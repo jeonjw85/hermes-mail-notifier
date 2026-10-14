@@ -3,7 +3,7 @@ import unittest
 from email.message import EmailMessage
 from unittest.mock import Mock
 
-from tests.support import deeply_nested_message, feature
+from tests.support import classification_data, deeply_nested_message, feature
 
 
 class MessageTests(unittest.TestCase):
@@ -21,6 +21,19 @@ class MessageTests(unittest.TestCase):
         self.assertIn("금요일까지", result.text)
         self.assertFalse(result.needs_body_review)
 
+    def test_metadata_is_bounded_and_not_mixed_into_body(self):
+        raw = ("To: Me <me@example.com>\r\nCc: team@example.com\r\n"
+               "Reply-To: reply@example.com\r\nMessage-ID: <message-1@example.com>\r\n"
+               "In-Reply-To: <previous@example.com>\r\nList-Id: news.example.com\r\n"
+               "List-Unsubscribe: <https://example.com/" + "x" * 2000 + ">\r\n"
+               "Auto-Submitted: auto-generated\r\n\r\nactual body").encode()
+        result = self.module.parse_message(raw)
+        self.assertEqual(getattr(result, "to", None), "Me <me@example.com>")
+        self.assertEqual(result.message_id, "<message-1@example.com>")
+        self.assertEqual(result.auto_submitted, "auto-generated")
+        self.assertLessEqual(len(result.list_unsubscribe), 1000)
+        self.assertEqual(result.text, "actual body")
+
     def test_encoded_display_address_cannot_override_actual_sender_rules(self):
         from mail_notifier.config import Settings
         from mail_notifier.triage import triage_message
@@ -29,8 +42,8 @@ class MessageTests(unittest.TestCase):
         mail = self.module.parse_message(raw)
         self.assertEqual(mail.sender_address, "attacker@evil.example")
         self.assertEqual(mail.sender_name, "boss@trusted.example")
-        complete = Mock(return_value={"important": False, "reason": "", "summary": "", "action": "", "deadline": ""})
-        self.assertFalse(triage_message(mail, Settings(important_senders=("@trusted.example",)), complete).important)
+        complete = Mock(return_value=classification_data(decision="suppress"))
+        self.assertFalse(triage_message(mail, Settings(always_notify_senders=("@trusted.example",)), complete).important)
         complete.reset_mock()
         self.assertFalse(triage_message(mail, Settings(ignored_senders=("@evil.example",)), complete).important)
         complete.assert_not_called()

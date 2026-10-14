@@ -33,6 +33,22 @@ hermes mail-notifier setup
 
 Hermes 소스 `d5aa9d7adf308ca466a118206c201254cf3ca977`에서 실제 호스트 계약을 검증했습니다. 플러그인의 추가 Python 런타임 의존성은 없습니다.
 
+## 검증과 출시 상태
+
+고정 Hermes 환경에서 중단 복구 검사를 포함한 183개 테스트가 통과했습니다. 50계정·10,000건 시뮬레이션도 누락·중복 없이 완료했습니다. 실제 모델 정확도와 서버의 메일 전달 검증은 아직 남아 있습니다.
+
+```sh
+python -m pip install -e '.[dev]'
+python -m unittest discover -s tests
+python -m ruff check .
+python -m pyright
+python -m tests.load_scenario --output load-report.json
+# 모델이 설정된 Hermes 서버에서 실행 (최대 360회 실제 모델 호출):
+hermes mail-notifier evaluate --runs 3 --output mail-evaluation.json
+```
+
+[120개 한영 평가 사례](evaluation/README.md)는 직접 작성한 가상 메일입니다. 단위 시험은 점수 계산을 검증하며 실제 모델 정확도를 뜻하지 않습니다. 실제 AI 평가와 메일 서비스·Telegram 수신 검증은 서버에서 수행해야 합니다.
+
 ## 계정 준비
 
 | 서비스 | IMAP 서버 (TLS 993) | 준비 |
@@ -64,24 +80,58 @@ Gmail은 앱 비밀번호를 발급할 수 있는 계정만 지원합니다. 조
 - `disable` / `enable`: 계정 확인 중지·재개. 대기 중인 알림은 보존합니다.
 - Enter: 현재 값 유지. 발신자·키워드 목록과 추가 판단 기준에서 `-`: 비우기.
 - 입력 중 Ctrl-C: 취소. 저장 이후 외부 단계에서 문제가 나면 완료된 단계와 오류 코드를 표시하므로 같은 `setup`을 재실행해 복구할 수 있습니다.
+- 잘못된 항목은 그 자리에서 다시 입력합니다. 연결 실패 시 `retry`·`password`·`back`·`cancel`을 선택하며, 앞서 입력한 다른 계정은 저장할 때까지 유지합니다.
 
 **처음 연결한 시점 이후 도착하는 메일부터** 확인합니다. 과거 메일은 한꺼번에 전송하지 않습니다. 읽은 새 메일도 처리하며, 별칭·비밀번호·판단 기준을 바꿔도 시작점을 초기화하지 않습니다. 서비스·로그인 아이디·메일함을 바꾸면 이전 연결을 중지하고 새 연결을 만듭니다.
 
 기존 cron의 일시정지 상태는 재설정해도 유지합니다. 모든 계정을 중지하면 cron도 일시정지되므로, 계정을 다시 켠 뒤에는 아래 `hermes cron resume JOB_ID`로 재개하세요.
+
+## 운영과 판단 교정
+
+```sh
+hermes mail-notifier accounts list --json
+hermes mail-notifier accounts add
+hermes mail-notifier accounts edit ACCOUNT_ID
+hermes mail-notifier accounts disable ACCOUNT_ID
+hermes mail-notifier accounts enable ACCOUNT_ID
+hermes mail-notifier doctor --json
+hermes mail-notifier doctor --live --json
+hermes mail-notifier history list --account ACCOUNT_ID --limit 20 --json
+hermes mail-notifier history show MAIL_ID
+hermes mail-notifier feedback add MAIL_ID --decision notify --note "읽어야 하는 개인적인 부탁"
+hermes mail-notifier feedback list
+hermes mail-notifier feedback remove FEEDBACK_ID
+hermes mail-notifier queue list --json
+hermes mail-notifier queue retry MAIL_ID
+hermes mail-notifier queue retry --account ACCOUNT_ID
+hermes mail-notifier queue retarget MAIL_ID --to telegram:123456789
+hermes mail-notifier policy show
+hermes mail-notifier policy set --instructions "개인 초대와 업무 요청을 우선해줘"
+hermes mail-notifier policy set --always-notify-senders boss@example.com
+hermes mail-notifier policy set --clear always_notify_senders
+```
+
+기본 `doctor`는 로컬 설정·인증 재로드·cron·백로그를 점검합니다. `--live`는 활성 메일함 로그인, 합성 메일의 모델 판단, Telegram 진단 메시지 전송도 실행합니다. 사용자 메일을 가져오지는 않습니다. 오류 코드와 다음 조치를 함께 표시합니다.
+
+`history`는 저장된 내용을 명시적으로 조회합니다. `status`·`queue`에는 본문·요약이 없습니다. 큐 변경에는 메일 ID 또는 명시적 계정 필터가 필요합니다. 전송 대기 재시도는 저장된 요약을 재사용합니다. 기본 Telegram 채널도 준비 시 실제 채팅·토픽 ID로 저장하며, 기존 대기 알림의 목적지를 바꾸려면 `retarget`을 사용합니다. 계정 중지·재개는 UID 기준점과 대기 작업을 보존합니다.
+
+교정은 원래 판단을 유지하며 완료 메일을 다시 보내지 않습니다. 최근 200건을 최대 180일 보존하고 동일 발신자 사례 최대 5개를 이후 AI 판단에 제공합니다. 본문은 판단 완료 또는 7일 후 제거하고 완료 판단 이력은 30일 보존합니다. `status --json`에서 한도·백로그·수집 재시도 상태·사용량도 확인할 수 있으며, 제공되지 않은 비용은 알 수 없음으로 남깁니다.
+
+Hermes 대화 도구: `mail_notifier_check`, `mail_notifier_status`, `mail_notifier_history`, `mail_notifier_queue`, `mail_notifier_feedback`, `mail_notifier_policy`, `mail_notifier_doctor`. 앱 비밀번호는 터미널 설정에서 입력하세요.
 
 ## 중요도 기준
 
 우선순위는 다음과 같습니다.
 
 1. **제외 발신자**: 모델 호출 없이 제외합니다.
-2. **중요 발신자 또는 키워드**: 중요 메일로 지정하고 모델로 요약합니다.
-3. **나머지**: 기본 기준과 사용자가 입력한 자연어 기준으로 판단합니다.
+2. **명시적 필수 알림 발신자** (`always_notify_senders`): 사용자가 지정한 필수 알림으로 처리하고 AI로 요약합니다.
+3. **일반 메일**: Hermes AI가 업무·개인 연락의 의미, 수신자 관련성, 읽거나 대응할 필요성을 판단합니다. 중요 발신자·키워드와 추가 자연어 기준은 판단 참고 정보입니다.
 
-발신자는 `boss@example.com`처럼 정확한 주소 또는 `@example.com`처럼 정확한 도메인을 사용합니다. 대소문자를 구분하지 않으며, 도메인 규칙은 하위 도메인까지 자동 확장하지 않습니다. 키워드는 제목과 본문의 부분 문자열로 비교합니다.
+발신자는 `boss@example.com`처럼 정확한 주소 또는 `@example.com`처럼 정확한 도메인을 사용합니다. 대소문자를 구분하지 않으며, 도메인 규칙은 하위 도메인까지 자동 확장하지 않습니다. 키워드가 있다는 이유만으로 AI의 제외 판단을 덮어쓰지 않습니다.
 
-기본적으로 회신·확인이 필요한 직접 연락, 기한·일정·계약, 결제 문제, 중요한 계정 보안 변화를 우선합니다. 광고·뉴스레터·일상적인 영수증은 낮은 중요도로 판단합니다. 예를 들어 추가 기준에 `면접 일정 변경과 계약 마감일을 우선해서 알려줘`를 입력할 수 있습니다.
+기본적으로 업무 요청·개인 연락, 기한·일정·계약 변경, 결제 실패, 중요한 계정 보안 변화를 우선합니다. 광고·홍보·뉴스레터·일상적인 영수증은 기본 제외합니다. 자동 발송된 예약 취소도 대응이 필요하면 알립니다. 예를 들어 추가 기준에 `면접 일정 변경과 계약 마감일을 우선해서 알려줘`를 입력할 수 있습니다.
 
-알림에는 계정, 발신자, 제목, 요약, 할 일, 기한을 표시합니다. 명시된 행동·기한이 없으면 `명시 없음`, 본문이 잘리거나 추출되지 않으면 `본문 확인 필요`를 표시합니다.
+알림에는 계정, 발신자, 제목, 판단 이유, 우선순위, 요약, 할 일, 기한, 메일 ID를 표시합니다. AI 결과는 업무·개인·거래·홍보·뉴스레터·판단 불충분으로 분류하고 `notify`·`suppress`·`review`로 처리합니다. 명시된 행동·기한이 없으면 `명시 없음`, 본문이 불완전하면 `본문 확인 필요`를 표시합니다. 불완전한 본문을 AI가 제외하려 하면 원문 확인 알림으로 전환합니다.
 
 ## 운영 명령
 
@@ -102,7 +152,7 @@ hermes cron pause JOB_ID
 hermes cron resume JOB_ID
 ```
 
-메일 서버의 UIDVALIDITY가 바뀌면 해당 계정을 `uidvalidity_changed`로 보류합니다. 서버 상태를 확인한 뒤 새 시작점으로 전환합니다.
+메일 서버의 UIDVALIDITY가 바뀌면 해당 계정의 새 수집을 `uidvalidity_changed`로 보류합니다. 이미 저장된 본문의 판단과 준비된 알림 전송은 계속할 수 있습니다. 서버 상태를 확인한 뒤 새 시작점으로 전환합니다.
 
 ```sh
 hermes mail-notifier reset ACCOUNT_ID
@@ -116,10 +166,14 @@ Hermes 대화에서도 `mail_notifier_check`, `mail_notifier_status` 도구를 �
 
 - 메일함은 읽기 전용으로 열고 `BODY.PEEK`를 사용합니다. 메일 읽음 상태를 변경하지 않습니다.
 - 첨부파일 내용은 처리하지 않습니다. 본문 일부가 현재 Hermes 모델로 전달되어 중요도·요약을 생성합니다.
-- 메일당 원문 256 KiB, 모델 입력 본문 12,000자, 한 번에 최대 20건입니다. 계정별로 번갈아 처리합니다.
+- 메일당 원문 256 KiB, 모델 입력 본문 12,000자입니다. 실행당 fetch·모델 호출·전송이 각각 기본 최대 20건이며, 단계·계정별로 번갈아 처리합니다.
 - 실행 후 240초부터 새 작업을 시작하지 않습니다. IMAP 20초, 모델 45초, 전송 30초의 호출 제한을 둡니다.
 - 새 메일과 재시도 작업이 없으면 모델·Telegram을 호출하지 않습니다. 모델 호출 비용은 기존 Hermes 모델 설정을 따릅니다.
 - 전송 실패 시 요약을 보관하고 5분 → 10분 → 20분 → 40분 → 최대 1시간 간격으로 재시도합니다. 유효한 성공 응답을 확인한 뒤에만 완료 처리합니다.
+- 수집·AI·전송의 재시도 상태를 별도로 저장합니다. IMAP 장애 중에도 저장된 본문을 판단하고 준비된 알림을 전송합니다. 모델 재시도 때 메일을 다시 가져오지 않습니다.
+- 잘못된 AI 응답이 5회 누적되면 원문 확인 알림을 만듭니다. 전송이 10회 실패하면 `held`로 보존하며 `status`에 보류 건수를 표시합니다.
+- 기본 미완료 큐는 2,000건, 본문 캐시는 200건입니다. 한도가 차면 수집을 늦추고, 저장하지 못한 메일의 UID를 건너뛰지 않습니다.
+- 목적지 변경은 새 알림부터 적용합니다. 이미 준비된 알림은 저장 당시 목적지를 유지합니다.
 - 반복 확인 시 같은 메일을 다시 보내지 않습니다. 다만 Telegram은 수신했으나 성공 응답이 유실되거나 로컬 완료 기록 직전에 종료된 경우에는 재시도로 중복될 수 있습니다.
 
 ### 자주 보는 오류
@@ -132,7 +186,7 @@ Hermes 대화에서도 `mail_notifier_check`, `mail_notifier_status` 도구를 �
 | `credentials_not_reloadable` | 환경변수에만 있는 모델·Telegram 인증을 해당 프로필의 Hermes 설정 또는 재로드 가능한 비밀정보 소스로 구성 |
 | `credential_reload_check_failed` | 현재 Hermes의 인증 로더와 비밀정보 소스가 새 프로세스에서도 동작하는지 확인 |
 | `model_unavailable` | 현재 프로필의 모델 설정·인증·연결 |
-| `invalid_model_output` | 모델 응답이 규격에 맞지 않아 대기 유지. 다음 주기에 재시도 |
+| `invalid_model_output` | 모델 응답이 규격에 맞지 않아 재시도. 5회 누적되면 원문 확인 알림 |
 | `delivery_failed` / `delivery_unverified` | Telegram 연결·목적지·Hermes 전송 결과 확인 |
 | `cron_operation_failed` | `setup`의 확인 주기와 `hermes cron status` 확인 |
 | `uidvalidity_changed` | 메일함 확인 후 해당 계정만 `reset` |
@@ -148,7 +202,9 @@ Hermes 대화에서도 `mail_notifier_check`, `mail_notifier_status` 도구를 �
 - UID 기준점·대기 알림·처리 이력: `plugin-data/hermes-mail-notifier/data.db`
 - cron 실행 진입점: `scripts/hermes-mail-notifier.py`
 
-전체 메일 원문은 저장하지 않습니다. 전송 대기 요약은 재시도에 재사용하며, 완료 이력은 30일 후 정리합니다. 설정·비밀번호·DB는 설치 코드 밖에 있어 업데이트로 덮어쓰지 않습니다.
+전체 원문·첨부파일은 저장하지 않습니다. 판단 대기 중인 정규화 본문은 최대 12,000자로 임시 저장하고 판단 완료 시 제거합니다. 7일이 지나면 캐시를 비우고 필요할 때 다시 수집합니다. 판단 이유·근거·요약과 완료 이력은 30일 보존합니다. 미완료 알림은 재시도에 재사용합니다. 기본 상태 출력에는 메일 본문·요약이 포함되지 않습니다. 설정·비밀번호·DB는 설치 코드 밖에 있습니다.
+
+기존 DB는 최초 실행 시 프로필 잠금 아래 v3로 이전하며 이전 스키마에 맞는 `data.db.v1.bak` 또는 `data.db.v2.bak` 백업을 만듭니다. 계정 ID·UID 기준점·대기 알림·cron ID를 보존합니다. **기존 중요 발신자·키워드는 강제 중요 처리에서 AI 판단 참고로 바뀝니다.** 명시적 필수 알림은 설정의 `always_notify_senders`로 구분합니다. `status`에서 DB·정책 버전, 단계별 대기·보류 수, 마지막 실행을 확인할 수 있습니다.
 
 ```sh
 hermes plugins update hermes-mail-notifier
@@ -170,7 +226,7 @@ hermes plugins remove hermes-mail-notifier
 ## 서버에서 실제 연결 확인
 
 1. `setup`을 마치고 Telegram의 설정 완료 메시지를 확인합니다.
-2. 테스트 발신자를 중요 발신자에 추가하고 **설정 이후** 새 메일을 보냅니다.
+2. **설정 이후** 회신이 필요한 업무·개인 테스트 메일을 보냅니다.
 3. `hermes mail-notifier check`로 요약 수신을 확인합니다.
 4. 다시 `check`했을 때 중복 전송되지 않는지 확인합니다.
 5. gateway와 cron이 활성화된 상태에서 다음 새 메일이 자동으로 전달되는지 확인합니다.

@@ -12,7 +12,12 @@ class RenderTests(unittest.TestCase):
         triage = feature(self, "mail_notifier.triage")
         self.account = Account(**account_data())
         self.mail = MailContent("boss@example.com", "Boss", "계약 확인", "Fri", "본문", False, False)
-        self.result = triage.TriageResult(True, "대응 필요", "계약 확인 요청", "회신", "")
+        self.result = triage.TriageResult("work", "notify", "normal", "대응 필요", "계약 확인 요청", "회신", "")
+
+    def test_render_includes_reason_priority_and_stable_id(self):
+        text = self.module.render_notification(self.account, self.mail, self.result, mail_id="abc123")
+        for value in ("대응 필요", "보통", "abc123"):
+            self.assertIn(value, text)
 
     def test_notification_has_all_user_facing_fields(self):
         text = self.module.render_notification(self.account, self.mail, self.result)

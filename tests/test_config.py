@@ -14,6 +14,48 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.target, "telegram")
         self.assertEqual(settings.language, "ko")
 
+    def test_legacy_settings_load_as_v2_without_losing_accounts(self):
+        raw = {"accounts": [account_data()], "target": "telegram:123",
+               "important_keywords": ["계약"], "important_senders": ["boss@example.com"]}
+        settings = self.config.load_settings(raw)
+        self.assertEqual(getattr(settings, "schema_version", None), 2)
+        self.assertEqual(settings.accounts[0].username, "a1@example.com")
+        self.assertEqual(settings.target, "telegram:123")
+        self.assertEqual(settings.important_keywords, ("계약",))
+        self.assertEqual(self.config.load_settings(self.config.dump_settings(settings)), settings)
+
+    def test_limits_reject_bools_zero_and_unbounded_values(self):
+        limits = {"max_run_seconds": (30, 240), "max_fetches": (1, 100),
+                  "max_model_calls": (1, 100), "max_deliveries": (1, 100),
+                  "max_pending": (200, 10000), "max_cached_bodies": (1, 1000)}
+        for name, (low, high) in limits.items():
+            for value in (low, high):
+                with self.subTest(name=name, valid=value):
+                    settings = self.config.load_settings({name: value})
+                    self.assertEqual(getattr(settings, name), value)
+            for value in (True, 0, -1, high + 1, "20"):
+                with self.subTest(name=name, invalid=value), self.assertRaises(self.config.ConfigError):
+                    self.config.load_settings({name: value})
+        with self.assertRaises(self.config.ConfigError):
+            self.config.load_settings({"max_pending": 20, "max_cached_bodies": 21})
+
+    def test_future_schema_and_invalid_explicit_rules_are_rejected(self):
+        for raw in ({"schema_version": 3}, {"schema_version": True},
+                    {"always_notify_senders": ["invalid-address"]}):
+            with self.subTest(raw=raw), self.assertRaises(self.config.ConfigError):
+                self.config.load_settings(raw)
+        self.assertEqual(self.config.load_settings({"always_notify_senders": ["boss@example.com"]}).always_notify_senders,
+                         ("boss@example.com",))
+
+    def test_fingerprint_tracks_effective_settings_not_mapping_order(self):
+        fingerprint = getattr(self.config, "settings_fingerprint", None)
+        self.assertTrue(callable(fingerprint), "settings fingerprint is not implemented")
+        a = self.config.load_settings({"target": "telegram:123", "language": "ko"})
+        b = self.config.load_settings({"language": "ko", "target": "telegram:123"})
+        c = self.config.load_settings({"target": "telegram:456", "language": "ko"})
+        self.assertEqual(fingerprint(a), fingerprint(b))
+        self.assertNotEqual(fingerprint(a), fingerprint(c))
+
     def test_multiple_accounts_round_trip_without_credentials(self):
         raw = {
             "accounts": [

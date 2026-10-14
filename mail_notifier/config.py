@@ -1,5 +1,7 @@
 """Validated, non-secret account settings."""
 
+import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass, fields
 
@@ -67,8 +69,27 @@ class Settings:
     ignored_senders: tuple[str, ...] = ()
     important_keywords: tuple[str, ...] = ()
     importance_instructions: str = ""
+    schema_version: int = 2
+    always_notify_senders: tuple[str, ...] = ()
+    max_run_seconds: int = 240
+    max_fetches: int = 20
+    max_model_calls: int = 20
+    max_deliveries: int = 20
+    max_pending: int = 2000
+    max_cached_bodies: int = 200
 
     def __post_init__(self):
+        if type(self.schema_version) is not int or self.schema_version != 2:
+            raise ConfigError("unsupported settings version")
+        limits = {"max_run_seconds": (30, 240), "max_fetches": (1, 100),
+                  "max_model_calls": (1, 100), "max_deliveries": (1, 100),
+                  "max_pending": (20, 10000), "max_cached_bodies": (1, 1000)}
+        for name, (low, high) in limits.items():
+            value = getattr(self, name)
+            if type(value) is not int or not low <= value <= high:
+                raise ConfigError(f"{name} must be an integer between {low} and {high}")
+        if self.max_cached_bodies > self.max_pending:
+            raise ConfigError("body cache limit must not exceed queue limit")
         if not isinstance(self.accounts, tuple) or not all(isinstance(a, Account) for a in self.accounts):
             raise ConfigError("accounts must be a sequence of accounts")
         if len({a.id for a in self.accounts}) != len(self.accounts):
@@ -79,7 +100,7 @@ class Settings:
                 raise ConfigError(f"{name} must not contain control characters")
         if not re.fullmatch(r"telegram(?::-?[1-9]\d*(?::[1-9]\d*)?)?", self.target):
             raise ConfigError("target must be telegram or telegram:chat_id[:thread_id]")
-        for name in ("important_senders", "ignored_senders", "important_keywords"):
+        for name in ("important_senders", "ignored_senders", "important_keywords", "always_notify_senders"):
             values = getattr(self, name)
             if not isinstance(values, tuple):
                 raise ConfigError(f"{name} must be a list of text values")
@@ -109,7 +130,7 @@ def load_settings(raw: dict) -> Settings:
         except TypeError:
             raise ConfigError("account fields are missing or unrecognized") from None
     data["accounts"] = tuple(parsed)
-    for name in ("important_senders", "ignored_senders", "important_keywords"):
+    for name in ("important_senders", "ignored_senders", "important_keywords", "always_notify_senders"):
         values = data.get(name, [])
         if not isinstance(values, (list, tuple)):
             raise ConfigError(f"{name} must be a list")
@@ -119,6 +140,11 @@ def load_settings(raw: dict) -> Settings:
 
 def dump_settings(settings: Settings) -> dict:
     data = asdict(settings)
-    for name in ("accounts", "important_senders", "ignored_senders", "important_keywords"):
+    for name in ("accounts", "important_senders", "ignored_senders", "important_keywords", "always_notify_senders"):
         data[name] = list(data[name])
     return data
+
+
+def settings_fingerprint(settings: Settings) -> str:
+    encoded = json.dumps(dump_settings(settings), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

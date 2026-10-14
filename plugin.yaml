@@ -1,14 +1,20 @@
 name: hermes-mail-notifier
-version: "0.1.0"
+version: "0.2.0"
 description: "Read-only Naver, Daum, and Gmail monitoring with important-email summaries sent to Telegram."
 provides_tools:
   - mail_notifier_check
   - mail_notifier_status
+  - mail_notifier_history
+  - mail_notifier_queue
+  - mail_notifier_feedback
+  - mail_notifier_policy
+  - mail_notifier_doctor
 config_schema:
   configuration:
     type: dict
     description: "Atomic settings snapshot. Manage with hermes mail-notifier setup; passwords are secret references only."
     default:
+      schema_version: 2
       accounts: []
       schedule: "every 5m"
       target: telegram
@@ -17,3 +23,10 @@ config_schema:
       ignored_senders: []
       important_keywords: []
       importance_instructions: ""
+      always_notify_senders: []
+      max_run_seconds: 240
+      max_fetches: 20
+      max_model_calls: 20
+      max_deliveries: 20
+      max_pending: 2000
+      max_cached_bodies: 200

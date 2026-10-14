@@ -1,5 +1,6 @@
 import argparse
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from mail_notifier.config import Settings
 from mail_notifier.hermes_host import HostError
 from mail_notifier.imap_client import MailboxError
+from mail_notifier.message import MailContent
 from tests.support import feature
 from tests.test_service import FakeHost, FakeMailbox
 
@@ -25,6 +27,10 @@ class SetupHost(FakeHost):
 
     def check_environment(self, settings):
         pass
+
+    def validate_schedule(self, schedule):
+        if schedule not in ("every 5m", "every 10m"):
+            raise HostError("invalid_schedule")
 
     def save_settings(self, settings):
         self.settings = settings
@@ -179,6 +185,60 @@ class CliTests(unittest.TestCase):
             from mail_notifier.service import RunReport
             check.return_value = RunReport(errors={"a1": "delivery_failed"})
             self.assertEqual(self.module.run_cli(parser.parse_args(["check"]), self.host), 1)
+
+    def test_status_explains_stored_decision_and_held_counts_without_content(self):
+        account = self.first_setup()
+        store = self.host.open_store()
+        key = (account.id, "INBOX", 7, 101)
+        store.enqueue(account, 7, [101])
+        store.cache_message(key, MailContent("boss@example.com", "Boss", "private subject", "", "private body", False, False), 1000)
+        store.retry(key, "model_unavailable", 1000, permanent=True)
+        store.record_run({"sent": 0}, 1000, 1001)
+        store.close()
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.module.run_cli(argparse.Namespace(mail_command="status", json=False), self.host), 0)
+        text = out.getvalue()
+        self.assertIn("보류 1", text)
+        self.assertIn("work-personal-v1", text)
+        self.assertIn("마지막 실행", text)
+        self.assertNotIn("private", text)
+
+    def test_migration_reports_changed_sender_preference_semantics(self):
+        self.first_setup()
+        self.assertIn("발신자·키워드는 AI 판단의 참고", self.output.getvalue())
+        self.assertIn("대기 알림은 기존 목적지", self.output.getvalue())
+
+    def test_setup_preserves_operational_limits_and_clears_verified_source_hold(self):
+        account = self.first_setup()
+        self.host.settings = replace(self.host.settings, max_fetches=3, always_notify_senders=("boss@example.com",))
+        store = self.host.open_store()
+        store.set_meta(f"source_hold:{account.id}", {"code": "credential_unavailable"})
+        store.close()
+        self.assertEqual(self.setup_with(["edit", account.id, "", "", "", "", "done"]), 0)
+        self.assertEqual(self.host.settings.max_fetches, 3)
+        self.assertEqual(self.host.settings.always_notify_senders, ("boss@example.com",))
+        store = self.host.open_store()
+        try:
+            self.assertIsNone(store.get_meta(f"source_hold:{account.id}"))
+        finally:
+            store.close()
+
+    def test_operations_cli_json_roundtrip_and_failure_exit(self):
+        account = self.first_setup()
+        parser = argparse.ArgumentParser()
+        self.module.configure_parser(parser)
+        for command in (["history", "list", "--account", account.id], ["queue", "list"],
+                        ["feedback", "list"], ["policy", "show"],
+                        ["policy", "set", "--instructions", "Prioritize personal mail"]):
+            with redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(self.module.run_cli(parser.parse_args([*command, "--json"]), self.host), 0)
+            self.assertIsInstance(json.loads(output.getvalue()), dict)
+        self.assertEqual(self.host.settings.importance_instructions, "Prioritize personal mail")
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.module.run_cli(parser.parse_args(["queue", "retry", "--json"]), self.host), 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["error"], "queue_scope_required")
+        self.assertTrue(result["next_action"])
 
 
 if __name__ == "__main__":

@@ -75,8 +75,8 @@ class IntegrationTests(unittest.TestCase):
             box = FakeMailbox(account)
             box.add()
             for host in hosts:
-                self.assertEqual(check_mail(host, mailbox_factory=lambda a, p: box).sent, 1)
-            self.assertEqual(check_mail(hosts[0], mailbox_factory=lambda a, p: box).sent, 0)
+                self.assertEqual(check_mail(host, mailbox_factory=lambda a, p, **kw: box).sent, 1)
+            self.assertEqual(check_mail(hosts[0], mailbox_factory=lambda a, p, **kw: box).sent, 0)
 
     def test_cron_shim_runs_exact_cli_and_home_with_spaces_and_korean(self):
         with tempfile.TemporaryDirectory(prefix="cron 한글 ") as directory:

@@ -22,3 +22,51 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Syntax check
         run: python -m compileall -q __init__.py mail_notifier tests
+      - name: Install development checks
+        run: python -m pip install -e '.[dev]'
+      - name: Lint and type check
+        run: |
+          python -m ruff check .
+          python -m pyright
+
+  hermes-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: d5aa9d7adf308ca466a118206c201254cf3ca977
+          path: hermes
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install pinned Hermes
+        run: python -m pip install -e ./hermes
+      - name: Require actual host imports
+        run: python -c 'from hermes_cli.plugins import PluginContext, PluginManager; from plugins.plugin_storage import plugin_db'
+      - name: Host contract suite (no host skips)
+        working-directory: plugin
+        env:
+          HERMES_CONTRACT: '1'
+        run: python -m unittest discover -s tests -v
+
+  load-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Process interruption recovery
+        run: python -m unittest tests.test_recovery -v
+      - name: Fifty accounts and ten thousand events
+        run: python -m tests.load_scenario --output load-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mail-notifier-load-report
+          path: load-report.json

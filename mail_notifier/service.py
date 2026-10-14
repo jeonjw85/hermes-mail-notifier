@@ -6,12 +6,12 @@ from collections import deque
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 
-from .config import MAX_MESSAGES, MAX_RUN_SECONDS, ConfigError
+from .config import ConfigError, settings_fingerprint
 from .hermes_host import HostError, ModelUnavailable
 from .imap_client import ImapMailbox, MailboxError
-from .render import render_notification
-from .store import UIDValidityChanged
-from .triage import TriageError, triage_message
+from .pipeline import RunBudget, classify_one, deliver_one, fetch_one
+from .store import StorageError, StoreBusy, UIDValidityChanged
+from .triage import TriageError
 
 
 @dataclass
@@ -21,13 +21,18 @@ class RunReport:
     ignored: int = 0
     errors: dict[str, str] = field(default_factory=dict)
     already_running: bool = False
+    fetched: int = 0
+    classified: int = 0
+    held: int = 0
+    model_calls: int = 0
+    duration_seconds: float = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
 def error_code(exc: Exception) -> str:
-    if isinstance(exc, (HostError, MailboxError, TriageError, UIDValidityChanged)):
+    if isinstance(exc, (HostError, MailboxError, TriageError, UIDValidityChanged, StorageError)):
         return exc.code
     if isinstance(exc, sqlite3.Error):
         return "storage_failed"
@@ -36,10 +41,162 @@ def error_code(exc: Exception) -> str:
     return "unexpected_error"
 
 
+class _Run:
+    def __init__(self, host, store, settings, report, budget, stack, mailbox_factory, clock):
+        self.host, self.store, self.settings, self.report = host, store, settings, report
+        self.budget, self.stack, self.factory, self.clock = budget, stack, mailbox_factory, clock
+        self.boxes, self.epochs = {}, {}
+        self.scanned, self.failed_sources, self.touched = set(), set(), set()
+        self.model_down = False
+        self.fingerprint = settings_fingerprint(settings)
+        self.target = None
+
+    def run(self):
+        accounts = {a.id: a for a in self.settings.accounts if a.enabled}
+        identifiers = list(accounts)
+        stages = ["ready", "fetched", "discovered"]
+        next_stage = self.store.get_meta("next_stage")
+        offset = stages.index(next_stage) if next_stage in stages else 0
+        stages = stages[offset:] + stages[:offset]
+        rotation = {}
+        for stage in stages:
+            next_account = self.store.get_meta(f"next_account:{stage}")
+            index = identifiers.index(next_account) if next_account in identifiers else 0
+            rotation[stage] = identifiers[index:] + identifiers[:index]
+        turns = deque((rotation[stage][index], stage) for index in range(len(identifiers)) for stage in stages)
+        idle = 0
+        while turns and idle < len(turns) and self.budget.remaining() > 0:
+            identifier, stage = turns.popleft()
+            turns.append((identifier, stage))
+            self.store.set_meta("next_stage", stages[(stages.index(stage) + 1) % len(stages)])
+            worked = self.step(accounts[identifier], stage)
+            if worked:
+                next_index = (identifiers.index(identifier) + 1) % len(identifiers)
+                self.store.set_meta(f"next_account:{stage}", identifiers[next_index])
+            idle = 0 if worked else idle + 1
+        self.report.processed = len(self.touched)
+        self.report.held = self.store.status()["held"]
+
+    def remember_error(self, account, exc):
+        code = error_code(exc)
+        self.report.errors[account.id] = code
+        self.store.record_error(account.id, code, self.clock())
+        return code
+
+    def complete(self, payload):
+        self.budget.consume("model")
+        self.report.model_calls += 1
+        return self.host.complete_structured(payload, timeout=min(45, self.budget.remaining()))
+
+    def send(self, target, notification):
+        return self.host.send(target or self.settings.target, notification, timeout=min(30, self.budget.remaining()))
+
+    def step(self, account, stage):
+        if stage == "discovered":
+            return self.collect(account)
+        lane = "model" if stage == "fetched" else "deliver"
+        if not self.budget.available(lane) or (stage == "fetched" and self.model_down):
+            return False
+        due = self.store.due(account.id, self.clock(), 1, status=stage)
+        if not due:
+            return False
+        item = due[0]
+        self.store.mark_attempt(item.key, status=stage)
+        self.touched.add(item.key)
+        try:
+            if stage == "fetched":
+                if self.target is None:
+                    self.target = self.host.resolve_target(self.settings.target)
+                result = classify_one(self.store, item, account, self.settings, self.complete, self.clock(), target=self.target)
+                self.report.classified += 1
+                self.report.ignored += int(not result.important)
+            else:
+                self.budget.consume("deliver")
+                deliver_one(self.store, item, self.send, self.clock())
+                self.report.sent += 1
+        except (HostError, TriageError) as exc:
+            code = self.remember_error(account, exc)
+            if isinstance(exc, ModelUnavailable):
+                self.model_down = True
+            # classify_one already counted malformed output, including the review fallback.
+            if not isinstance(exc, TriageError):
+                self.store.retry(item.key, code, self.clock())
+        return True
+
+    def collect(self, account):
+        if (account.id in self.failed_sources or not self.budget.available("fetch")
+                or self.store.cached_count() >= self.settings.max_cached_bodies):
+            return False
+        hold = self.store.get_meta(f"source_hold:{account.id}")
+        if hold and hold.get("fingerprint") == self.fingerprint:
+            self.report.errors[account.id] = hold["code"]
+            return False
+        retry = self.store.get_meta(f"source_retry:{account.id}", {})
+        if retry.get("retry_at", 0) > self.clock():
+            self.report.errors[account.id] = retry["code"]
+            return False
+        item, worked = None, False
+        try:
+            if account.id not in self.boxes:
+                mailbox = self.stack.enter_context(self.factory(
+                    account, self.host.get_password(account), timeout=min(20, self.budget.remaining()),
+                    remaining=self.budget.remaining))
+                self.boxes[account.id] = mailbox
+                mailbox.set_timeout(min(20, self.budget.remaining()))
+                epoch, highest = mailbox.snapshot()
+                self.epochs[account.id] = epoch
+                cursor = self.store.cursor(account.id)
+                if cursor is None:
+                    self.store.initialize(account, epoch, highest)
+                    self.scanned.add(account.id)
+                elif cursor[0] != epoch:
+                    raise UIDValidityChanged("uidvalidity_changed")
+                self.store.record_error(account.id, None, self.clock())
+                if account.id not in self.scanned and self.budget.remaining() > 0:
+                    capacity = self.store.capacity(self.settings.max_pending)
+                    if capacity:
+                        mailbox.set_timeout(min(20, self.budget.remaining()))
+                        page = mailbox.discover(self.store.scan_cursor(account.id),
+                                                min(capacity, self.settings.max_fetches), highest)
+                        self.store.enqueue(account, epoch, page.uids, now=self.clock(),
+                                           scanned_through=page.scanned_through, max_pending=self.settings.max_pending)
+                    self.scanned.add(account.id)
+                worked = True
+            if self.budget.remaining() <= 0:
+                return worked
+            due = self.store.due(account.id, self.clock(), 1, status="discovered")
+            if not due:
+                self.store.set_meta(f"source_retry:{account.id}", {})
+                return worked
+            item = due[0]
+            if item.key[2] != self.epochs[account.id]:
+                raise UIDValidityChanged("uidvalidity_changed")
+            self.store.mark_attempt(item.key, status="discovered")
+            self.touched.add(item.key)
+            self.budget.consume("fetch")
+            mailbox = self.boxes[account.id]
+            mailbox.set_timeout(min(20, self.budget.remaining()))
+            self.report.fetched += int(fetch_one(self.store, item, mailbox, self.clock()))
+            self.store.set_meta(f"source_retry:{account.id}", {})
+        except (MailboxError, HostError, UIDValidityChanged) as exc:
+            code = self.remember_error(account, exc)
+            self.failed_sources.add(account.id)
+            permanent = code in {"imap_authentication_failed", "imap_mailbox_unavailable", "credential_unavailable"}
+            if permanent:
+                self.store.set_meta(f"source_hold:{account.id}", {"code": code, "fingerprint": self.fingerprint})
+            else:
+                attempts = retry.get("attempts", 0) + 1
+                self.store.set_meta(f"source_retry:{account.id}", {
+                    "code": code, "attempts": attempts,
+                    "retry_at": self.clock() + min(300 * 2 ** min(attempts - 1, 4), 3600)})
+            if item is not None and not isinstance(exc, UIDValidityChanged):
+                self.store.retry(item.key, code, self.clock(), permanent=permanent)
+            return True
+        return item is not None or worked
+
+
 def check_mail(host, *, mailbox_factory=ImapMailbox, clock=time.time, monotonic=time.monotonic) -> RunReport:
-    report = RunReport()
-    started = monotonic()
-    expired = lambda: monotonic() - started >= MAX_RUN_SECONDS
+    report, started, wall_started = RunReport(), monotonic(), clock()
     try:
         with ExitStack() as stack:
             store = host.open_store()
@@ -48,82 +205,19 @@ def check_mail(host, *, mailbox_factory=ImapMailbox, clock=time.time, monotonic=
                 report.already_running = True
                 return report
             settings = host.load_settings()
-            accounts = [account for account in settings.accounts if account.enabled]
-            ids = [account.id for account in accounts]
-            next_id = store.get_meta("next_account_id")
-            offset = ids.index(next_id) if next_id in ids else 0
-            turns = deque(accounts[offset:] + accounts[:offset])
-            queues, mailboxes = {}, {}
-            model_unavailable = False
-            while turns and report.processed < MAX_MESSAGES and not expired():
-                account = turns.popleft()
-                store.set_meta("next_account_id", ids[(ids.index(account.id) + 1) % len(ids)])
-                if account.id not in mailboxes:
-                    try:
-                        mailbox = stack.enter_context(mailbox_factory(account, host.get_password(account)))
-                        epoch, highest = mailbox.snapshot()
-                        cursor = store.cursor(account.id)
-                        if cursor is None:
-                            store.initialize(account, epoch, highest)
-                            store.record_error(account.id, None, clock())
-                            continue
-                        if cursor[0] != epoch:
-                            raise UIDValidityChanged("uidvalidity_changed")
-                        if expired():
-                            break
-                        store.enqueue(account, epoch, mailbox.new_uids(cursor[1], MAX_MESSAGES))
-                        store.record_error(account.id, None, clock())
-                        queues[account.id] = deque(store.due(account.id, clock(), MAX_MESSAGES))
-                        mailboxes[account.id] = mailbox
-                    except (MailboxError, HostError, UIDValidityChanged) as exc:
-                        code = error_code(exc)
-                        report.errors[account.id] = code
-                        store.record_error(account.id, code, clock())
-                        continue
-                queue = queues[account.id]
-                if not queue:
-                    continue
-                item = queue.popleft()
-                if queue:
-                    turns.append(account)
-                if expired():
-                    break
-                if model_unavailable and item.status == "pending":
-                    continue
-                store.mark_attempt(item.key)
-                report.processed += 1
-                try:
-                    notification = item.notification
-                    if item.status == "pending":
-                        mail = mailboxes[account.id].fetch(item.key[-1])
-                        if mail is None:
-                            store.finish(item.key, "missing", clock())
-                            continue
-                        if expired():
-                            break
-                        result = triage_message(mail, settings, host.complete_structured)
-                        if not result.important:
-                            store.finish(item.key, "ignored", clock())
-                            report.ignored += 1
-                            continue
-                        notification = render_notification(account, mail, result)
-                        store.prepare(item.key, notification)
-                    if expired():
-                        break
-                    receipt = host.send(settings.target, notification)
-                    store.finish(item.key, "sent", clock(), receipt)
-                    report.sent += 1
-                except (MailboxError, HostError, TriageError) as exc:
-                    code = error_code(exc)
-                    if isinstance(exc, ModelUnavailable):
-                        model_unavailable = True
-                    report.errors[account.id] = code
-                    store.retry(item.key, code, clock())
-                    store.record_error(account.id, code, clock())
-                    if isinstance(exc, MailboxError):
-                        # A dropped connection cannot be reused for this account's other UIDs.
-                        queues[account.id].clear()
+            budget = RunBudget(settings, monotonic, started=started)
             store.prune(clock())
+            with ExitStack() as connections:
+                run = _Run(host, store, settings, report, budget, connections, mailbox_factory, clock)
+                try:
+                    run.run()
+                except Exception as exc:
+                    report.errors["run"] = error_code(exc)
+                    report.processed = len(run.touched)
+            report.duration_seconds = max(0, monotonic() - started)
+            store.record_run(report.to_dict(), wall_started, clock())
+    except StoreBusy:
+        report.already_running = True
     except Exception as exc:
         report.errors["run"] = error_code(exc)
     return report
@@ -142,6 +236,9 @@ def get_status(host) -> dict:
             for account in settings.accounts
         ]
         status.update(target=settings.target, schedule=settings.schedule, language=settings.language)
+        status["limits"] = {name: getattr(settings, name) for name in (
+            "max_pending", "max_cached_bodies", "max_fetches", "max_model_calls", "max_deliveries", "max_run_seconds")}
+        status["backlog"] = status["pending"] >= settings.max_pending or status["cached_bodies"] >= settings.max_cached_bodies
         job_id = store.get_meta("cron_job_id")
         status["cron"] = {"job_id": job_id, "state": "not_configured"}
         if job_id:
@@ -170,7 +267,10 @@ def reset_account(host, account_id: str, *, mailbox_factory=ImapMailbox, clock=t
                 raise HostError("account_not_found")
             with mailbox_factory(account, host.get_password(account)) as mailbox:
                 epoch, highest = mailbox.snapshot()
+            previous = next((row for row in store.status()["accounts"] if row["account_id"] == account.id), {})
+            stages = {name: previous.get(name, 0) for name in ("discovered", "fetched", "ready", "held")}
             count = store.reset(account, epoch, highest, clock())
-            return {"account_id": account.id, "uidvalidity": epoch, "last_uid": highest, "superseded": count}
+            return {"account_id": account.id, "uidvalidity": epoch, "last_uid": highest,
+                    "superseded": count, "superseded_by_stage": stages}
     finally:
         store.close()

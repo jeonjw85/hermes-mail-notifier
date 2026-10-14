@@ -4,6 +4,7 @@ import argparse
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ from mail_notifier.config import Account, PLUGIN_ID, Settings
 from mail_notifier.hermes_host import HermesHost, HostError
 from mail_notifier.message import MailContent
 from mail_notifier.triage import triage_message
-from tests.support import account_data
+from tests.support import account_data, classification_data
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -135,6 +136,10 @@ class HermesContractTests(unittest.TestCase):
             self.host.check_environment(settings)
 
     def test_cron_list_create_update_pause_and_recover_id(self):
+        self.host.validate_schedule("every 5m")
+        with self.assertRaises(HostError) as caught:
+            self.host.validate_schedule("evry five minutes")
+        self.assertEqual(caught.exception.code, "invalid_schedule")
         script = self.home / "scripts/hermes-mail-notifier.py"
         self.host._write_shim(script)
         created = self.host.manage_cron("create", name=PLUGIN_ID, prompt="Managed by hermes-mail-notifier.",
@@ -153,11 +158,30 @@ class HermesContractTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_migrated_destination_survives_real_home_channel_change(self):
+        from hermes_cli.config import save_env_value
+        from tests.test_migrations import create_v1
+        save_env_value("TELEGRAM_BOT_TOKEN", "test-only-contract-token")
+        save_env_value("TELEGRAM_HOME_CHANNEL", "111")
+        data = self.home / "plugin-data" / PLUGIN_ID
+        data.mkdir(parents=True)
+        db = sqlite3.connect(data / "data.db")
+        create_v1(db)
+        db.close()
+        store = self.host.open_store()
+        try:
+            self.assertEqual(store.due("a1", 2000, 10, status="ready")[0].target, "telegram:111")
+            save_env_value("TELEGRAM_HOME_CHANNEL", "222")
+            self.assertEqual(self.host.resolve_target("telegram"), "telegram:222")
+            self.assertEqual(store.due("a1", 2000, 10, status="ready")[0].target, "telegram:111")
+        finally:
+            store.close()
+
     def test_structured_facade_and_real_media_parser_accept_our_payload(self):
         from gateway.platforms.base import BasePlatformAdapter
         from mail_notifier.render import render_notification
         mail = MailContent("boss@example.com", "MEDIA:/private/a.pdf", "계약", "", "내일 답장", False, False)
-        output = {"important": True, "reason": "회신 필요", "summary": "MEDIA:/tmp/a.pdf [[audio_as_voice]]", "action": "", "deadline": ""}
+        output = classification_data(summary="MEDIA:/tmp/a.pdf [[audio_as_voice]]")
         captured = []
         def caller(**kwargs):
             captured.append(kwargs)

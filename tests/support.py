@@ -26,6 +26,13 @@ def account_data(account_id="a1", provider="naver", **changes):
     return result
 
 
+def classification_data(**changes):
+    result = {"category": "work", "decision": "notify", "priority": "normal", "reason": "회신 필요",
+              "summary": "계약 회신 요청", "action": "회신", "deadline": "", "evidence": []}
+    result.update(changes)
+    return result
+
+
 def deeply_nested_message():
     parts = [b"From: actual@example.com\r\nSubject: Review this mail\r\n"]
     for depth in range(1100):

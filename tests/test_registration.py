@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -28,7 +29,8 @@ class RegistrationTests(unittest.TestCase):
         ctx.dispatch_tool.assert_not_called()
         self.assertEqual(ctx.register_cli_command.call_args.kwargs["name"], "mail-notifier")
         names = {call.kwargs["name"] for call in ctx.register_tool.call_args_list}
-        self.assertEqual(names, {"mail_notifier_check", "mail_notifier_status"})
+        self.assertEqual(names, {"mail_notifier_check", "mail_notifier_status", "mail_notifier_history",
+                                "mail_notifier_queue", "mail_notifier_feedback", "mail_notifier_policy", "mail_notifier_doctor"})
         manifest = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text()
         for name in names:
             self.assertIn(name, manifest)
@@ -44,6 +46,29 @@ class RegistrationTests(unittest.TestCase):
             parsed = json.loads(result)
             self.assertIn("error", parsed)
             self.assertNotIn("private message", result)
+
+    def test_operational_tool_validation_precedes_changes(self):
+        from tests.test_cli import SetupHost
+        module = self.load_plugin()
+        ctx = Mock()
+        module.register(ctx)
+        handlers = {call.kwargs["name"]: call.kwargs["handler"] for call in ctx.register_tool.call_args_list}
+        self.assertIn("mail_notifier_queue", handlers)
+        with tempfile.TemporaryDirectory() as path:
+            host = SetupHost(path)
+            before = host.settings
+            cases = [("queue", {"action": "delete"}), ("queue", {"action": "retry"}),
+                     ("queue", {"action": "retry", "account_id": "other-profile-account"}),
+                     ("queue", {"action": "retarget", "account_id": "a1", "target": "invalid"}),
+                     ("feedback", {}), ("feedback", {"action": "remove", "feedback_id": True}),
+                     ("policy", {"changes": {"target": "telegram:222"}}), ("doctor", {"live": "false"}),
+                     ("history", {"unexpected": True})]
+            for name, args in cases:
+                with self.subTest(name=name, args=args), patch.object(module, "HermesHost", return_value=host):
+                    result = json.loads(handlers["mail_notifier_" + name](args))
+                self.assertFalse(result["success"])
+                self.assertEqual(host.settings, before)
+                self.assertEqual(host.deliveries, [])
 
 
 if __name__ == "__main__":

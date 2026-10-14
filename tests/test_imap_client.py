@@ -1,4 +1,5 @@
 import imaplib
+import socket
 import ssl
 import unittest
 from dataclasses import replace
@@ -98,6 +99,82 @@ class ImapTests(unittest.TestCase):
         search = next(c for c in self.connection.calls if c[0] == "SEARCH")
         self.assertNotIn("UNSEEN", str(search))
 
+    def test_discovery_searches_finite_uid_window(self):
+        self.connection.search_result = b"101 102"
+        with self.module.ImapMailbox(self.account, "test-only-password") as mailbox:
+            self.assertTrue(hasattr(mailbox, "discover"), "bounded discovery is not implemented")
+            page = mailbox.discover(100, 20, 1000000)
+        self.assertEqual(page.uids, [101, 102])
+        self.assertEqual(page.scanned_through, 1100)
+        self.assertIn(("SEARCH", None, "UID 101:1100"), self.connection.calls)
+
+    def test_empty_sparse_window_advances_scan_only(self):
+        self.connection.search_result = b""
+        with self.module.ImapMailbox(self.account, "test-only-password") as mailbox:
+            self.assertTrue(hasattr(mailbox, "discover"), "bounded discovery is not implemented")
+            page = mailbox.discover(100, 20, 1000000)
+        self.assertEqual((page.uids, page.scanned_through), ([], 1100))
+
+    def test_snapshot_without_uidnext_fetches_only_highest_uid(self):
+        self.connection.uidnext = None
+        self.connection.fetch_result = ("OK", [b"3 (UID 555)"])
+        with self.module.ImapMailbox(self.account, "test-only-password") as mailbox:
+            self.assertEqual(mailbox.snapshot(), (7, 555))
+        self.assertNotIn(("SEARCH", None, "ALL"), self.connection.calls)
+        self.assertIn(("FETCH", "*", "(UID)"), self.connection.calls)
+
+    def test_partial_result_never_skips_unenqueued_uid(self):
+        self.connection.search_result = b"101 102 103"
+        with self.module.ImapMailbox(self.account, "test-only-password") as mailbox:
+            self.assertTrue(hasattr(mailbox, "discover"), "bounded discovery is not implemented")
+            page = mailbox.discover(100, 2, 500)
+        self.assertEqual((page.uids, page.scanned_through), ([101, 102], 102))
+
+    def test_discovery_stops_at_snapshot_upper_uid(self):
+        self.connection.search_result = b"101 102"
+        with self.module.ImapMailbox(self.account, "test-only-password") as mailbox:
+            self.assertTrue(hasattr(mailbox, "discover"), "bounded discovery is not implemented")
+            self.assertEqual(mailbox.discover(100, 20, 102).scanned_through, 102)
+            self.connection.search_result = b"103"
+            with self.assertRaises(self.module.MailboxError):
+                mailbox.discover(100, 20, 102)
+        self.assertIn(("SEARCH", None, "UID 101:102"), self.connection.calls)
+
+    def test_remaining_timeout_reaches_socket(self):
+        self.connection.sock = socket.socket()
+        self.addCleanup(self.connection.sock.close)
+        with self.module.ImapMailbox(self.account, "test-only-password") as mailbox:
+            self.assertTrue(hasattr(mailbox, "set_timeout"), "dynamic timeout is not implemented")
+            mailbox.set_timeout(1.25)
+            self.assertEqual(self.connection.sock.gettimeout(), 1.25)
+
+    def test_connection_stages_share_deadline_and_expired_cleanup_is_local(self):
+        elapsed, started = [0], []
+        self.connection.sock = socket.socket()
+        self.addCleanup(self.connection.sock.close)
+        self.connection.shutdown = Mock()
+        def connect(*args, timeout, **kwargs):
+            started.append(("connect", timeout))
+            self.connection.sock.settimeout(timeout)
+            elapsed[0] += 19
+            return self.connection
+        def login(*args):
+            timeout = self.connection.sock.gettimeout()
+            started.append(("login", timeout))
+            elapsed[0] += min(19, timeout)
+            raise TimeoutError()
+        self.factory.side_effect = connect
+        self.connection.login = login
+        mailbox = self.module.ImapMailbox(self.account, "secret")
+        mailbox.remaining = lambda: max(0, 30 - elapsed[0])
+        with self.assertRaises(self.module.MailboxError):
+            with mailbox:
+                pass
+        self.assertEqual(started, [("connect", 20), ("login", 11)])
+        self.assertEqual(elapsed[0], 30)
+        self.assertFalse(self.connection.logged_out)
+        self.connection.shutdown.assert_called_once()
+
     def test_uid_star_does_not_replay_and_empty_mailbox(self):
         self.connection.search_result = b"100"
         with self.module.ImapMailbox(self.account, "test-only-password") as mailbox:
@@ -132,6 +209,7 @@ class ImapTests(unittest.TestCase):
             with self.module.ImapMailbox(self.account, "test-only-password"):
                 pass
         self.assertNotIn("test-only-password", str(caught.exception))
+        self.assertEqual(caught.exception.code, "imap_authentication_failed")
         self.assertTrue(self.connection.logged_out)
 
     def test_partial_body_is_flagged_and_unexpected_uid_rejected(self):

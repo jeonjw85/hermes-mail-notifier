@@ -109,7 +109,7 @@ class HermesHostTests(unittest.TestCase):
                 self.host.save_password(self.account, "test-only-password")
 
     def test_structured_call_uses_host_model_with_timeout(self):
-        self.assertEqual(self.host.complete_structured({"instructions": "test", "input": []}), {"answer": 1})
+        self.assertEqual(self.host.complete_structured({"instructions": "test", "input": []}).parsed, {"answer": 1})
         args = self.ctx.llm.complete_structured.call_args.kwargs
         self.assertEqual(args["timeout"], 45)
         self.assertNotIn("provider", args)
@@ -118,6 +118,17 @@ class HermesHostTests(unittest.TestCase):
         with self.assertRaises(self.module.ModelUnavailable) as caught:
             self.host.complete_structured({})
         self.assertNotIn("private", str(caught.exception))
+
+    def test_usage_is_preserved_without_raw_model_text(self):
+        self.ctx.llm.complete_structured.return_value = types.SimpleNamespace(
+            parsed={"answer": 1}, text="private raw model output", provider="test-provider", model="test-model",
+            usage=types.SimpleNamespace(input_tokens=12, output_tokens=3, total_tokens=15, cost_usd=None))
+        reply = self.host.complete_structured({}, timeout=1.5)
+        self.assertEqual(reply.usage["total_tokens"], 15)
+        self.assertIsNone(reply.usage["cost_usd"])
+        self.assertEqual(reply.model, "test-model")
+        self.assertNotIn("private raw", repr(reply))
+        self.assertEqual(self.ctx.llm.complete_structured.call_args.kwargs["timeout"], 1.5)
 
     def test_send_uses_stdin_and_clean_profile_environment(self):
         proc = subprocess.CompletedProcess([], 0, json.dumps({"success": True, "message_id": "99"}), "")
@@ -209,9 +220,21 @@ class HermesHostTests(unittest.TestCase):
         for code, text in [(0, 'noise\n{"success":true,"message_id":"9"}'), (1, '{"success":true,"message_id":"9"}')]:
             with patch.object(self.module.subprocess, "run", return_value=subprocess.CompletedProcess([], code, text, "")), self.assertRaises(self.module.DeliveryError):
                 self.host.send("telegram", "summary")
+
         with patch.object(self.module.subprocess, "run", side_effect=subprocess.TimeoutExpired("hermes", 30)), self.assertRaises(self.module.DeliveryError):
             self.host.send("telegram", "summary")
 
+    def test_resolve_target_freezes_home_channel_and_topic(self):
+        self.assertTrue(hasattr(self.host, "resolve_target"), "destination resolution is not implemented")
+        home = types.SimpleNamespace(chat_id="-100123", thread_id="456")
+        gateway = types.SimpleNamespace(Platform=types.SimpleNamespace(TELEGRAM="telegram"),
+                                        load_gateway_config=lambda: types.SimpleNamespace(get_home_channel=lambda _: home))
+        with patch.dict(sys.modules, {"gateway.config": gateway,
+                                      "hermes_cli.send_cmd": types.SimpleNamespace(_load_hermes_env=lambda: None)}):
+            saved = self.host.resolve_target("telegram")
+            home.chat_id = "-100789"
+            self.assertEqual(saved, "telegram:-100123:456")
+            self.assertEqual(self.host.resolve_target(saved), saved)
     def test_schedule_recovers_after_crash_before_saving_id(self):
         job_id = self.host.install_schedule(self.settings, self.store)
         self.store.set_meta("cron_job_id", None)

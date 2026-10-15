@@ -10,6 +10,7 @@ fields rather than profile-local class identity.
 import asyncio
 import concurrent.futures
 import contextvars
+import json
 import secrets
 import sys
 import threading
@@ -110,7 +111,23 @@ def _native(item):
         raise ValueError("invalid_native_identity")
     if not values["kind"] or not values["update_key"] or len(values["update_key"]) > 200:
         raise ValueError("invalid_native_input")
-    if len(values["value"].encode("utf-8")) > 4096:
+    size = len(values["value"].encode("utf-8"))
+    if values["kind"] == "reply":
+        # Text edits have a separate bound. Account for JSON escaping, then
+        # enforce the decoded UTF-8 limit; encrypted Web App wires stay 4096.
+        if size > 6 * 16 * 1024 + 256:
+            raise ValueError("native_input_too_large")
+        try:
+            reply = json.loads(values["value"])
+        except (ValueError, RecursionError):
+            raise ValueError("invalid_native_input") from None
+        if (type(reply) is not dict or set(reply) != {"prompt_message_id", "text"}
+                or not isinstance(reply["prompt_message_id"], str) or len(reply["prompt_message_id"]) > 200
+                or not isinstance(reply["text"], str)):
+            raise ValueError("invalid_native_input")
+        if len(reply["text"].encode("utf-8")) > 16 * 1024:
+            raise ValueError("native_input_too_large")
+    elif size > 4096:
         raise ValueError("native_input_too_large")
     return NativeInput(**values)
 

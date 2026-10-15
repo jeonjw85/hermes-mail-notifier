@@ -16,13 +16,15 @@ Install the plugin on the server running Hermes:
 hermes plugins install jeonjw85/hermes-mail-notifier --enable
 ```
 
-Run the initial setup:
+Open a private chat with the profile's existing Telegram bot and send **`/mail`**. Choose **한국어 / English**, then the mail service. Non-secret management works without a credential page. **No public credential-page URL is configured in this version**: new connections and password replacement require the operator to configure a trusted HTTPS `credential_page_url` first. Never send passwords in chat.
+
+Optional secure terminal setup:
 
 ```sh
 hermes mail-notifier setup --ui-language en
 ```
 
-Run installation and setup in **the same Hermes profile that already uses Telegram**. Enter app passwords in an interactive terminal on the server; password input is hidden.
+Run installation and setup in **the same Hermes profile that already uses Telegram**. The terminal alternative uses hidden password input; Telegram uses only the encrypted Mini App opened by the bot's secure reply-keyboard button.
 
 Requirements:
 - Linux or macOS with Python 3.11 or later. The plugin runs with the Python interpreter used by your Hermes installation.
@@ -35,7 +37,9 @@ Host integration contracts have been verified against Hermes source revision `d5
 
 ## Verification and Release Status
 
-Local verification: 183 tests passed with pinned Hermes, including process recovery checks. A 50-account, 10,000-message simulation completed without lost or duplicate deliveries. Real-model accuracy and live-server delivery checks remain pending.
+Offline verification includes pinned-Hermes admission/loader/reload contracts, encrypted-input interoperability, management and process recovery. A 50-account, 10,000-message simulation completed without lost or duplicate deliveries. These are not live Telegram, mail-server or model-accuracy tests.
+
+Public hosting/Pages activation and a release-default credential-page URL remain unconfigured. Live Android/iOS/Desktop reply-keyboard and encrypted-return checks, provider accounts, model/delivery verification, and the remote/container/no-inbound deployment matrix remain release gates. No Telegram client or deployment form is claimed live-verified. The Mini App needs HTTPS and Telegram/Web Crypto support; it does not require an installer dashboard, domain or inbound port. A blocked/unavailable page affects credential entry, not existing notifications or non-secret management. Use the optional CLI rather than plaintext chat if secure entry is unavailable.
 
 ```sh
 python -m pip install -e '.[dev]'
@@ -64,7 +68,17 @@ Official guides:
 
 Gmail support requires an account that can create app passwords. Accounts blocked from doing so by organization policies, Advanced Protection, or similar restrictions are currently unsupported. OAuth authentication is not supported.
 
-## Setup Wizard
+## Telegram Setup and Management
+
+`/mail` uses the authenticated private conversation, not model-supplied IDs. Choose a service, enter the login address, read its app-password guide, and use **Secure app password** when a trusted page is configured. Review and confirm before saving; only then do model/baseline checks, credential/settings publication, scheduling and test delivery run. New defaults: **5 minutes, INBOX, the current authenticated private chat/topic**, and the selected/detected UI language proposed for summaries. Existing settings are preserved.
+
+Later, select accounts by their numbered label/address/status buttons (five per page), without typing UUIDs. The panel supports adding accounts, labels/login/mailbox/service changes, password replacement, disabling/enabling accounts, 5/10/15/30/60-minute schedules, separate UI/summary languages, and sender/domain/keyword/instruction rules with explicit clearing. Existing advanced schedules and arbitrary summary languages are preserved until explicitly changed. All edits, including using the current chat for future notifications, show a preview and need confirmation. Existing group/topic destinations remain supported; there is no new group-discovery UI.
+
+**Status and recovery** shows cron/backlog information and offers a confirmed settings/test refresh. Recorded cron or test-delivery failures retry only unfinished steps, without repeating saved credentials, baselines or model checks. Paused automation never resumes implicitly: confirm **Resume automatic checks**, or explicitly keep it paused and continue management. Conflicts show current settings and the prior candidate; acknowledging retains evidence, does not roll back or finish failed writes, and starts a fresh review from current settings. Prepared notifications keep their text/destination, and existing account IDs, UID cursors and work are retained; changing service/login/mailbox stops the old connection and creates a new one.
+
+Non-secret drafts last up to 24 hours without changes; pending passwords stay in process memory for at most 10 minutes and need re-entry after expiry/restart. Text edits are limited to **16 KiB UTF-8**; oversized inputs are rejected, never silently shortened. Long existing values are preserved and abbreviated only for plain-text display. Encrypted Mini App submissions retain their separate 4096-byte wire limit. The page operator, Telegram client and Hermes host are trust boundaries. Users authorized for the same Hermes profile share that profile's management authority; this is not a multi-tenant account service.
+
+## Terminal Setup Wizard
 
 Use `setup` to manage accounts and notification rules together.
 
@@ -74,7 +88,7 @@ Use `setup` to manage accounts and notification rules together.
 4. Enter `yes` to explicitly confirm publication. Setup checks a synthetic email with the model, takes a fresh mailbox starting point, saves credentials/settings, updates its owned scheduled job and verifies a Telegram test-message ID.
 5. For later management, use `add`, `edit`, `disable`, `enable`, then `done`. Multiple accounts from the same service are supported. These changes also require confirmation before publication.
 
-New-installation defaults are **every 5 minutes**, **summaries in the selected/detected UI language**, **INBOX**, and **the current profile's Telegram home channel**. Existing schedules, destinations, summary languages (including values such as `fr`), rules and operational limits are preserved. Destination examples include `telegram`, `telegram:123456789`, and `telegram:-1001234567890:456`. In the last example, the final number is the topic ID.
+Terminal new-installation defaults are **every 5 minutes**, **summaries in the selected/detected UI language**, **INBOX**, and **the current profile's Telegram home channel**. Existing schedules, destinations, summary languages (including values such as `fr`), rules and operational limits are preserved. Destination examples include `telegram`, `telegram:123456789`, and `telegram:-1001234567890:456`. In the last example, the final number is the topic ID.
 
 - `edit`: Change an account's label, password, or connection details. Enter its account ID or displayed number.
 - `disable` / `enable`: Stop or resume checks for an account. Pending notifications are preserved.
@@ -94,7 +108,7 @@ After a settings conflict, setup shows the prior candidate and `current_settings
 
 The existing `language` setting controls model summaries and the fixed labels, fallback reasons, setup confirmation and diagnostic test notifications. Choose `ko` or `en` in `setup`, or use `hermes mail-notifier policy set --language en`. Other existing summary-language values remain supported: the model receives the value unchanged, while fixed messages fall back to English. Already prepared notifications keep their saved text and destination.
 
-The separate `ui_language` setting selects Korean/English setup, status and diagnostic guidance without changing an existing summary `language`. Use `setup --ui-language ko|en` or `accounts add/edit --ui-language ko|en`. Resolution is explicit selection → saved UI language → CLI `LC_ALL`, `LC_MESSAGES`, `LANG` (first nonempty value) → English. Regional locales such as `ko-KR` and `en_US.UTF-8` are normalized; unsupported locales use English. CLI help shows both languages. Telegram setup/Mini App UI is not available yet; use the secure terminal flow.
+The separate `ui_language` setting selects Korean/English setup, status and diagnostic guidance without changing an existing summary `language`. Choose it in `/mail`, or use `setup --ui-language ko|en` / `accounts add/edit --ui-language ko|en`. Resolution is explicit selection → saved UI language → Telegram `language_code` or CLI `LC_ALL`, `LC_MESSAGES`, `LANG` (first nonempty value) → English. Regional locales such as `ko-KR` and `en_US.UTF-8` are normalized; unsupported locales use English. CLI help shows both languages. Secure Mini App entry still requires the trusted HTTPS page configuration and live-release checks described above.
 
 ## Operations and Corrections
 
@@ -127,7 +141,7 @@ Default `doctor` checks local configuration, credential reload, cron and backlog
 
 Corrections keep the original judgment intact and never resend completed mail. The latest 200 corrections are retained for at most 180 days; up to five matching-sender examples guide future AI judgments. Bodies expire after seven days or classification; completed decisions expire after 30 days. `status --json` includes limits, backpressure, source retry state and available usage. Missing cost data stays unknown.
 
-Hermes conversation tools: `mail_notifier_check`, `mail_notifier_status`, `mail_notifier_history`, `mail_notifier_queue`, `mail_notifier_feedback`, `mail_notifier_policy`, `mail_notifier_doctor`. Enter app passwords only through terminal setup.
+Hermes conversation tools: `mail_notifier_check`, `mail_notifier_status`, `mail_notifier_history`, `mail_notifier_queue`, `mail_notifier_feedback`, `mail_notifier_policy`, `mail_notifier_doctor`, and argument-free `mail_notifier_setup`. The setup tool only opens the panel for a verified live Telegram origin; elsewhere it directs you to `/mail`. Existing explicit policy tools and CLI commands remain available. Enter passwords only through secure Mini App entry or hidden terminal setup.
 
 ## Importance Rules
 

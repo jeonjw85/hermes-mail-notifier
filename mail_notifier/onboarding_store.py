@@ -48,7 +48,8 @@ def _form(value):
     result = dict(_object(value, _FORM_FIELDS))
     if any(not isinstance(text, str) or "\x00" in text for text in result.values()):
         _invalid()
-    if result.get("input_field", "") not in (_FORM_FIELDS - {"input_field", "prompt_message_id"}) | {""}:
+    if result.get("input_field", "") not in (_FORM_FIELDS - {"input_field", "prompt_message_id"}) | {
+            "", "important_senders", "ignored_senders", "always_notify_senders", "important_keywords", "importance_instructions"}:
         _invalid()
     return result
 

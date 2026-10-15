@@ -415,11 +415,50 @@ class TelegramAdmissionContractTests(unittest.IsolatedAsyncioTestCase):
         with _profile_runtime_scope(self.harness.beta_home):
             self.harness.profiles["beta"].controller.ctx.set_config("configuration", dump_settings(Settings(accounts=accounts)))
         await self.harness.dispatch_native(route="beta")
+        for _ in range(9):
+            await self.harness.press("Next accounts", route="beta")
         messages = [kwargs["text"] for _, kwargs in self.harness.native_sent]
-        self.assertTrue(all(len(message.encode("utf-16-le")) // 2 <= 4096 for message in messages))
+        self.assertTrue(all(len(message.encode("utf-16-le")) // 2 <= 3500 for message in messages))
         self.assertIn("a0@example.com", "".join(messages))
         self.assertIn("a49@example.com", "".join(messages))
         self.harness.button("Connect another account")
+
+    async def test_management_native_unicode_edits_are_bounded_preserved_and_never_forwarded(self):
+        self.harness.fake_mail_services()
+        from gateway.run import _profile_runtime_scope
+        from mail_notifier.config import Account, Settings, dump_settings, load_settings
+        from tests.support import account_data
+        from telegram import ForceReply
+        from telegram.ext import MessageHandler, filters
+        with _profile_runtime_scope(self.harness.beta_home):
+            self.harness.profiles["beta"].controller.ctx.set_config("configuration", dump_settings(Settings(
+                accounts=(Account(**account_data("a1")),), ui_language="en", language="fr", target="telegram:-222:3")))
+        # Even during editing, normal agent processing cannot see these inputs.
+        self.harness.application.add_handler(MessageHandler(filters.TEXT, self.harness.adapter._handle_text_message))
+        await self.harness.dispatch_native(route="beta")
+        await self.harness.press("Importance rules", route="beta")
+        await self.harness.press("Additional importance instructions", route="beta")
+        def prompt():
+            return next(message for message, kwargs in reversed(self.harness.native_sent) if isinstance(kwargs.get("reply_markup"), ForceReply))
+        value = "🙂" * 4096
+        await self.harness.dispatch_native(text=value + "🙂", reply=prompt(), route="beta")
+        self.assertTrue(any("16 KiB" in kwargs["text"] for _, kwargs in self.harness.native_sent))
+        with _profile_runtime_scope(self.harness.beta_home):
+            settings = load_settings(self.harness.profiles["beta"].controller.ctx.get_config("configuration"))
+            self.assertEqual(settings.importance_instructions, "")
+        await self.harness.dispatch_native(text=value, reply=prompt(), route="beta")
+        self.harness.button("Start with these settings")
+        self.assertNotIn(value, repr(self.harness.events))
+        self.assertFalse(self.harness.model_inputs)
+        await self.harness.press("Start with these settings", route="beta")
+        with _profile_runtime_scope(self.harness.beta_home):
+            settings = load_settings(self.harness.profiles["beta"].controller.ctx.get_config("configuration"))
+            self.assertEqual(settings.importance_instructions, value)
+            self.assertEqual(settings.language, "fr")
+            self.assertEqual(settings.target, "telegram:-222:3")
+        for _, kwargs in self.harness.native_sent:
+            self.assertIsNone(kwargs["parse_mode"])
+            self.assertTrue(kwargs["disable_web_page_preview"])
 
     async def test_public_reload_survives_old_async_cleanup_and_repeated_unload(self):
         profile = self.harness.profiles["default"]

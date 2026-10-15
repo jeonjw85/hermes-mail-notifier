@@ -57,6 +57,13 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 self.broker.take(reference, receipt)
 
+    async def test_runtime_prune_discards_expired_native_inputs_and_releases_waiters(self):
+        reference = self.broker.offer(self.item(), now=100)
+        with patch("mail_notifier.onboarding_auth.time.monotonic", return_value=130):
+            self.broker.prune()
+        self.assertNotIn(reference, self.broker._state.records)
+        self.assertIsNone(await self.broker.wait(reference, timeout=.01))
+
     async def test_identity_changes_and_non_private_sources_never_admit(self):
         for field, value in (("scope_id", "701"), ("user_id", "222"), ("chat_id", "222"),
                              ("thread_id", "10"), ("chat_type", "group"), ("is_bot", True)):

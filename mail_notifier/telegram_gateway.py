@@ -55,16 +55,22 @@ def register_admission(ctx):
     ctx.on_unload(broker.close)
 
     def post_admission(*, platform, source, message_id, session_key, text, **kwargs):
-        from hermes_constants import get_hermes_home
-        if str(get_hermes_home().resolve()) != broker.profile_home:
-            return None
-        broker.admit(platform=platform, source=source, message_id=message_id, session_key=session_key,
-                     text=text, now=time.monotonic())
-        if not text.startswith(PREFIX):
-            broker.record_origin(platform=platform, source=source, message_id=message_id,
-                                 session_key=session_key, now=time.monotonic())
-        # A copied marker is also consumed, but can never release a native input.
-        return {"action": "handled"} if text.startswith(PREFIX) else None
+        return on_admission(broker, platform=platform, source=source, message_id=message_id,
+                            session_key=session_key, text=text)
 
     ctx.register_hook("post_gateway_admission", post_admission)
     return broker
+
+
+def on_admission(broker, *, platform, source, message_id, session_key, text):
+    """Shared admission callback, also used by the lazy public registration."""
+    from hermes_constants import get_hermes_home
+    if str(get_hermes_home().resolve()) != broker.profile_home:
+        return None
+    broker.admit(platform=platform, source=source, message_id=message_id, session_key=session_key,
+                 text=text, now=time.monotonic())
+    if not text.startswith(PREFIX):
+        broker.record_origin(platform=platform, source=source, message_id=message_id,
+                             session_key=session_key, now=time.monotonic())
+    # A copied marker is also consumed, but can never release a native input.
+    return {"action": "handled"} if text.startswith(PREFIX) else None

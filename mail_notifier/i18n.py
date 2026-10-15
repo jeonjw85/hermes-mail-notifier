@@ -254,6 +254,64 @@ MESSAGES["en"].update({
 })
 
 
+MESSAGES["en"].update({
+    "telegram.entry": "Open /mail in a private Telegram chat to connect email. Never send a password in chat.",
+    "telegram.provider": "Connect email · Choose your service.",
+    "telegram.naver": "Naver", "telegram.daum": "Daum / Hanmail", "telegram.gmail": "Gmail",
+    "telegram.address": "Reply to this prompt with your login email address. Do not send a password.",
+    "telegram.secret": "App password · Use the secure input button, never a chat message.",
+    "telegram.secure": "Secure app password", "telegram.guide": "Issuing instructions",
+    "telegram.back": "Back", "telegram.cancel": "Cancel", "telegram.add": "Connect another account",
+    "telegram.confirm": "Start with these settings", "telegram.repair": "Retry failed step",
+    "telegram.resume": "Resume automatic checks", "telegram.keep_paused": "Keep paused and continue",
+    "telegram.acknowledge": "Acknowledge and restart from current settings",
+    "telegram.settings": "Destination: {target}\nSchedule: {schedule}\nSummary language: {summary_language}",
+    "telegram.current": "Current saved settings:", "telegram.steps": "Recorded steps: {steps}",
+    "telegram.evidence": "Settings published: {saved}\nVerified steps: {steps}\nNext action: {next}",
+    "telegram.yes": "yes", "telegram.no": "no",
+    "telegram.completed": "Setup complete · New-mail baseline, model check, schedule and Telegram test verified. Keep Hermes gateway running.",
+    "telegram.paused": "Connection saved; automatic checks remain paused. This is not an automatic-check completion.",
+    "telegram.partial": "Setup is not complete. Saved steps below are retained; retry the recorded failure, not the entire connection.",
+    "telegram.cancelled": "Cancelled before publication. Use /mail to start again.",
+    "telegram.expired": "This setup expired. Use /mail to start again.",
+    "telegram.acknowledged": "Prior evidence retained, not rolled back or completed. Automatic checks were not resumed. Use /mail to review current settings in a new attempt.",
+    "telegram.error": "Could not finish: {code}. Inputs are preserved. Use /mail to review and retry.",
+    "telegram.stale": "This reply or button is no longer current. Use /mail and the newest prompt.",
+    "telegram.retry": "Admission was not confirmed. No setup action was started. Try /mail again when the gateway is ready.",
+    "telegram.group": "For email setup, open a private chat with this bot and send /mail. Do not send passwords here.",
+    "telegram.queued": "Mail Notifier · Request queued; inputs are preserved. Slow checks run one at a time per profile.",
+    "telegram.url_unavailable": "Secure input unavailable: the operator must configure a trusted HTTPS credential_page_url. Do not send passwords in chat. CLI alternative: hermes mail-notifier setup.",
+})
+MESSAGES["ko"].update({
+    "telegram.entry": "Telegram 개인 대화에서 /mail로 메일을 연결하세요. 비밀번호를 대화에 보내지 마세요.",
+    "telegram.provider": "메일 연결 · 서비스를 선택하세요.",
+    "telegram.naver": "네이버", "telegram.daum": "다음/한메일", "telegram.gmail": "Gmail",
+    "telegram.address": "이 안내에 답장으로 로그인 메일 주소를 보내세요. 비밀번호는 보내지 마세요.",
+    "telegram.secret": "앱 비밀번호 · 일반 메시지가 아닌 보안 입력 버튼을 사용하세요.",
+    "telegram.secure": "앱 비밀번호 안전하게 입력", "telegram.guide": "발급 안내",
+    "telegram.back": "이전", "telegram.cancel": "취소", "telegram.add": "다른 계정 연결",
+    "telegram.confirm": "이 설정으로 시작", "telegram.repair": "실패 단계 다시 시도",
+    "telegram.resume": "자동 확인 재개", "telegram.keep_paused": "일시정지 유지하고 계속",
+    "telegram.acknowledge": "확인 후 현재 설정으로 다시 시작",
+    "telegram.settings": "알림 대화: {target}\n확인 주기: {schedule}\n요약 언어: {summary_language}",
+    "telegram.current": "현재 저장된 설정:", "telegram.steps": "기록된 단계: {steps}",
+    "telegram.evidence": "설정 발행 여부: {saved}\n확인된 단계: {steps}\n다음 조치: {next}",
+    "telegram.yes": "예", "telegram.no": "아니요",
+    "telegram.completed": "설정 완료 · 새 메일 기준점·모델 검사·예약·Telegram 테스트를 확인했습니다. Hermes gateway를 실행해 두세요.",
+    "telegram.paused": "연결은 저장되었지만 자동 확인은 계속 일시정지 상태입니다. 자동 확인 시작 완료가 아닙니다.",
+    "telegram.partial": "설정 미완료. 아래 저장된 단계는 유지됩니다. 계정을 다시 만들지 말고 실패 단계를 재시도하세요.",
+    "telegram.cancelled": "발행 전 취소했습니다. 다시 시작하려면 /mail을 사용하세요.",
+    "telegram.expired": "설정이 만료되었습니다. /mail로 다시 시작하세요.",
+    "telegram.acknowledged": "이전 저장 증거는 보존되며 롤백·완료되지 않았습니다. 자동 확인을 재개하지 않았습니다. /mail로 현재 설정을 새로 검토하세요.",
+    "telegram.error": "완료하지 못했습니다: {code}. 입력은 보존됩니다. /mail로 확인 후 다시 시도하세요.",
+    "telegram.stale": "오래된 답장 또는 버튼입니다. /mail을 실행하고 가장 최근 안내를 사용하세요.",
+    "telegram.retry": "인증 승인을 확인하지 못해 설정 작업을 시작하지 않았습니다. gateway가 준비되면 /mail로 다시 시도하세요.",
+    "telegram.group": "이 봇과의 개인 대화에서 /mail로 메일을 연결하세요. 여기에 비밀번호를 보내지 마세요.",
+    "telegram.queued": "Mail Notifier · 요청 대기 중. 입력은 보존됩니다. 느린 검사는 프로필당 하나씩 실행됩니다.",
+    "telegram.url_unavailable": "보안 입력을 사용할 수 없습니다. 운영자가 신뢰하는 HTTPS credential_page_url을 설정해야 합니다. 대화에 비밀번호를 보내지 마세요. CLI 대안: hermes mail-notifier setup.",
+})
+
+
 def resolve_ui_language(*, explicit: str = "", saved: str = "", detected: str = "") -> str:
     """Resolve the first selected locale; unsupported or missing locales use English."""
     selected = explicit or saved or detected

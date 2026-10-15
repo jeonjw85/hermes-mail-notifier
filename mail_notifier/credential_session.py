@@ -13,7 +13,7 @@ import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from .hermes_host import HostError
@@ -139,6 +139,22 @@ class CredentialSessions:
         with self._lock:
             self._prune(self._clock())
 
+    def close(self) -> None:
+        """Drop this profile runtime's ephemeral keys on unload."""
+        with self._lock:
+            self._sessions.clear()
+            self._failures.clear()
+
+    def reject(self, owner: SetupOwner) -> NoReturn:
+        """Charge a malformed/unbound envelope to the admitted sender's budget."""
+        user = owner_key(owner)[:4]
+        with self._lock:
+            now = self._clock()
+            self._prune(now)
+            if len(self._failures.get(user, [])) < 5:
+                self._failures.setdefault(user, []).append(now)
+        raise HostError("invalid_credential_submission")
+
     def invalidate(self, draft_id: str, owner: SetupOwner) -> None:
         identity = owner_key(owner)
         with self._lock:
@@ -220,9 +236,8 @@ class CredentialSessions:
                     record.attempt_id = secrets.token_urlsafe(32)
                 return CredentialInput(record.attempt_id, binding.draft_id, binding.revision,
                                        duplicate, None if duplicate else password)
-            self._failures.setdefault(user, []).append(now)
             # No parser/Unicode/crypto exception context containing plaintext.
-            raise HostError("invalid_credential_submission")
+            self.reject(binding.owner)
 
 
 def credential_url(base_url: str, challenge: CredentialChallenge, *, provider: str,

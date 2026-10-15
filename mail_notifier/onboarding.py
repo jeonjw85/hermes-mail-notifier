@@ -49,10 +49,16 @@ class _Secret:
 
 
 class OnboardingService:
-    def __init__(self, host, *, mailbox_factory=ImapMailbox, clock=time.time):
+    def __init__(self, host, *, mailbox_factory=ImapMailbox, clock=time.time, check_active=lambda: None):
         self.host, self.mailbox_factory, self.clock = host, mailbox_factory, clock
+        self._check_active = check_active
         self._secrets = {}
         self._state_lock = threading.RLock()
+
+    def close(self) -> None:
+        """Discard this runtime's pending credentials without changing durable state."""
+        with self._state_lock:
+            self._secrets.clear()
 
     def _key(self, draft, account_id):
         return draft.id, owner_key(draft.owner), account_id
@@ -79,6 +85,7 @@ class OnboardingService:
                     del self._secrets[key]
 
     def _read(self, draft_id, owner, revision=None):
+        self._check_active()
         if owner_key(owner)[0] != str(self.host.home().resolve()):
             raise HostError("setup_not_found")
         self.expire()
@@ -92,6 +99,7 @@ class OnboardingService:
         # Durable revision publication and cache rebinding are one short local
         # critical section. Never hold this lock over IMAP/model/host writes.
         with self._state_lock:
+            self._check_active()
             with closing(self.host.open_setup_store()) as store:
                 changed = store.cas(replace(draft, **changes), expected_revision=draft.revision, now=self.clock())
             accounts = {a.id: a for a in changed.candidate.accounts}
@@ -140,6 +148,7 @@ class OnboardingService:
                          or (a.id in markers and not markers[a.id].get("verified") and not self._secret(draft, a)))), "")
 
     def start(self, owner: SetupOwner, *, detected_language: str = "") -> SetupDraft:
+        self._check_active()
         if owner_key(owner)[0] != str(self.host.home().resolve()):
             raise HostError("setup_not_found")
         self.expire()
@@ -376,6 +385,7 @@ class OnboardingService:
         try:
             self.host.check_compatibility()
             self.host.check_environment(draft.candidate)
+            self._check_active()
             self.host.resolve_target(draft.candidate.target)
             if any(a.enabled for a in draft.candidate.accounts):
                 language = draft.candidate.language
@@ -463,6 +473,7 @@ class OnboardingService:
                         secret = self._secret(draft, account)
                         if secret is None:
                             return self._result(self._save(draft, state="needs_secret"))
+                        self._check_active()
                         self.host.save_password(account, secret.password)
                         if self.host.get_password(account) != secret.password:
                             raise HostError("credential_save_failed")
@@ -480,6 +491,7 @@ class OnboardingService:
                             if baseline or steps.get("credentials", {}).get(account.id, {}).get("verified"):
                                 store.resume_source(account.id, self.clock())
                         if not (recovering and same_candidate):
+                            self._check_active()
                             self.host.save_settings(draft.candidate)
                         if self.host.load_settings() != draft.candidate:
                             raise HostError("settings_save_failed")
@@ -487,6 +499,7 @@ class OnboardingService:
                         draft = self._save(draft, steps=steps)
                         self._forget(draft.id)
                     if "cron" not in steps or resume_cron or refresh_cron:
+                        self._check_active()
                         job_id = self.host.install_schedule(draft.candidate, store)
                         if resume_cron and job_id and any(a.enabled for a in draft.candidate.accounts):
                             self.host.resume_schedule(job_id, store)
@@ -508,6 +521,7 @@ class OnboardingService:
             steps["test_delivery"] = {"started": True}
             draft = self._save(draft, steps=steps)
             try:
+                self._check_active()
                 result = self.host.send(self.host.resolve_target(draft.candidate.target),
                                         text("setup.notification", draft.candidate.language) + "\n" + draft.id, timeout=30)
                 message_id = result.get("message_id")

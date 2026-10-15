@@ -144,6 +144,11 @@ class AdmissionBroker:
         if record is not None and not record["future"].done():
             record["future"].set_result(None)
 
+    def prune(self):
+        """Periodic gateway cleanup uses the same expiry policy as admission."""
+        with self._state.lock:
+            self._expire(time.monotonic())
+
     def close(self):
         """Release this profile registration's lease, never another profile's state."""
         with self._state.lock:
@@ -271,6 +276,14 @@ class AdmissionBroker:
 
 
 class OriginProofs:
+    @staticmethod
+    def language_code(receipt: AdmissionReceipt) -> str:
+        """Display-only SDK locale from the same currently verified observation."""
+        if OriginProofs.current() is not receipt:
+            return ""
+        observation = _shared().observation.get()
+        return NativeInput(*observation[2], value="").language_code if observation else ""
+
     @staticmethod
     def current() -> AdmissionReceipt | None:
         """Require the host's *bound* task locals, never its legacy env fallback.

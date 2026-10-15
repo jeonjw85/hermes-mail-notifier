@@ -51,8 +51,11 @@ class GatewayHarness:
             self.event_objects = []
             self.model_inputs = []
             self.sent = []
+            self.native_sent = []
+            self.callback_answers = []
             self.profiles = {}
             self.request_origin = False
+            self.requested_tool = "mail_contract_origin"
             self.tool_results = []
             self.tool_done = asyncio.Event()
             from gateway.run import _profile_runtime_scope
@@ -69,7 +72,7 @@ class GatewayHarness:
                         "model:\n  provider: openai-api\n  default: test-only-model\n"
                         "  api_mode: chat_completions\n  base_url: http://127.0.0.1:1/v1\n  context_length: 128000\n"
                         "auxiliary:\n  title_generation:\n    enabled: false\n"
-                        "platform_toolsets:\n  telegram: [mail_contract]\n"
+                        "platform_toolsets:\n  telegram: [mail_contract, mail_notifier]\n"
                         "display:\n  tool_progress: off\n  thinking: false\n"
                         "gateway:\n  unauthorized_dm_behavior: ignore\n", encoding="utf-8")
                     (home / ".env").write_text("TELEGRAM_ALLOWED_USERS=111\nOPENAI_API_KEY=test-only-key\n", encoding="utf-8")
@@ -85,13 +88,19 @@ class GatewayHarness:
                         raise AssertionError(loaded.error)
                     module = importlib.import_module(loaded.module.__name__ + ".mail_notifier.telegram_gateway")
                     ctx = PluginContext(manifest, manager)
-                    broker = module.register_admission(ctx)
+                    controller = next(cb.__self__ for cb in manager._hooks["post_gateway_admission"]
+                                      if cb.__module__.startswith(loaded.module.__name__))
+                    broker = controller.broker
+                    original_wait = broker.wait
+                    async def short_wait(reference, *, timeout=30, wait=original_wait):
+                        return await wait(reference, timeout=min(timeout, .1))
+                    self.patch(broker, "wait", short_wait)
                     ctx.register_tool(name="mail_contract_origin", toolset="mail_contract", description="Contract probe",
                                       handler=self.origin_tool,
                                       schema={"name": "mail_contract_origin", "description": "Contract probe",
                                               "parameters": {"type": "object", "properties": {}}})
                     manager._hooks.setdefault("pre_gateway_dispatch", []).append(self.record_event)
-                    self.profiles[name] = SimpleNamespace(manager=manager, module=module, broker=broker)
+                    self.profiles[name] = SimpleNamespace(manager=manager, module=module, broker=broker, controller=controller)
                     # Parse the real host locale catalog outside the event loop;
                     # the first denied-message/agent turn would otherwise block it.
                     from agent.i18n import t
@@ -117,6 +126,19 @@ class GatewayHarness:
                 return self.model_response(api_kwargs)
             self.patch(AIAgent, "_interruptible_api_call", model_call)
             self.patch(AIAgent, "_interruptible_streaming_api_call", model_call)
+            from telegram import Bot, User
+            from telegram.ext import Application, ExtBot
+            self.bot = ExtBot(token="700:test-only")
+            self.bot._bot_user = User(id=700, first_name="Test bot", is_bot=True, username="mail_contract_bot")
+            self.application = Application.builder().bot(self.bot).updater(None).build()
+            self.application._initialized = True
+            self.patch(Bot, "send_message", self.native_send)
+            self.patch(ExtBot, "send_message", self.native_send)
+            self.patch(Bot, "answer_callback_query", self.answer_callback)
+            self.patch(ExtBot, "answer_callback_query", self.answer_callback)
+            with _profile_runtime_scope(self.home):
+                self.adapter._wire_plugin_handlers(self.application)
+            self.native_counter = 100
         except BaseException:
             self._dispose()
             raise
@@ -203,6 +225,119 @@ class GatewayHarness:
         self.sent.append((args, kwargs))
         return SendResult(success=True)
 
+    async def native_send(self, *args, **kwargs):
+        from telegram import Chat, Message
+        message = Message(message_id=1000 + len(self.native_sent), date=datetime.now(timezone.utc),
+                          chat=Chat(id=int(kwargs["chat_id"]), type="private"), from_user=self.bot.bot,
+                          text=kwargs["text"], message_thread_id=kwargs.get("message_thread_id"),
+                          is_topic_message=bool(kwargs.get("message_thread_id")),
+                          reply_markup=kwargs.get("reply_markup"))
+        message.set_bot(self.bot)
+        self.native_sent.append((message, kwargs))
+        return message
+
+    async def answer_callback(self, *args, **kwargs):
+        self.callback_answers.append(kwargs)
+        return True
+
+    def button(self, label):
+        for message, kwargs in reversed(self.native_sent):
+            markup = kwargs.get("reply_markup")
+            for row in getattr(markup, "inline_keyboard", ()):
+                for button in row:
+                    if button.text == label:
+                        return button.callback_data, message
+        raise AssertionError("Missing native button: " + label)
+
+    async def press(self, label, **kwargs):
+        token, message = self.button(label)
+        return await self.dispatch_native(callback=token, reply=message, **kwargs)
+
+    def fake_mail_services(self):
+        """Only replace the external service boundaries, not admission or config."""
+        from tests.test_service import FakeMailbox
+        from tests.support import classification_data
+        self.mail_effects = []
+        self.mail_scopes = []
+        self.mail_passwords = {}
+        self.imap_probes = []
+        self.cron_paused = False
+        self.delivery_failure = False
+        for profile in self.profiles.values():
+            module = importlib.import_module(profile.controller.__module__)
+            def mailbox(account, password):
+                self.imap_probes.append(account.id)
+                return FakeMailbox(account)
+            self.patch(module, "ImapMailbox", mailbox)
+            cls = module.HermesHost
+            def save_password(host, account, password):
+                key = str(host.home()), account.id
+                self.mail_passwords[key] = password
+                self.mail_effects.append((str(host.home()), "password", threading.get_ident()))
+            def get_password(host, account):
+                return self.mail_passwords[(str(host.home()), account.id)]
+            def schedule(host, settings, store):
+                self.mail_scopes.append(host.ctx._manager.scope_key)
+                self.mail_effects.append((str(host.home()), "cron", threading.get_ident()))
+                store.set_meta("cron_paused", self.cron_paused)
+                store.set_meta("cron_job_id", "synthetic-job")
+                return "synthetic-job"
+            def resume(host, job_id, store):
+                self.cron_paused = False
+                store.set_meta("cron_paused", False)
+            def model(host, payload, **kwargs):
+                self.mail_scopes.append(host.ctx._manager.scope_key)
+                self.mail_effects.append((str(host.home()), "model", threading.get_ident()))
+                return classification_data()
+            def send(host, target, text, **kwargs):
+                from mail_notifier.hermes_host import HostError
+                self.mail_effects.append((str(host.home()), "send", threading.get_ident()))
+                if self.delivery_failure:
+                    raise HostError("delivery_failed")
+                return {"success": True, "message_id": "synthetic-delivery"}
+            for name, value in (("save_password", save_password), ("get_password", get_password),
+                                ("install_schedule", schedule), ("resume_schedule", resume),
+                                ("complete_structured", model), ("send", send),
+                                ("check_environment", lambda host, settings: None),
+                                ("check_compatibility", lambda host: None)):
+                self.patch(cls, name, value)
+            # Operator configuration is separate from the settings snapshot.
+            self.patch(cls, "credential_page_url", lambda host: "https://operator.example/credential/")
+
+    async def dispatch_native(self, *, text="/mail", callback=None, reply=None, web_app=None,
+                              user_id="111", bot=None, thread_id=None, chat_type="private", route=None,
+                              allowed_users="111", drain=True, language_code="en"):
+        from telegram import CallbackQuery, Chat, Message, MessageEntity, Update, User, WebAppData
+        from gateway.profile_routing import ProfileRoute
+        from gateway.run import _profile_runtime_scope
+        self.native_counter += 1
+        number = self.native_counter
+        bot = bot or self.bot
+        self.config.profile_routes = [ProfileRoute(name="mail", platform="telegram", profile=route, chat_id=user_id)] if route else []
+        (self.home / ".env").write_text(f"TELEGRAM_ALLOWED_USERS={allowed_users}\nOPENAI_API_KEY=test-only-key\n", encoding="utf-8")
+        user = User(id=int(user_id), first_name="Tester", is_bot=False, language_code=language_code)
+        chat = Chat(id=int(user_id) if chat_type == "private" else -123, type=chat_type)
+        message = Message(message_id=number, date=datetime.now(timezone.utc), chat=chat, from_user=user,
+                          text=None if web_app is not None else text, reply_to_message=reply,
+                          message_thread_id=thread_id,
+                          is_topic_message=thread_id is not None,
+                          entities=[MessageEntity("bot_command", 0, len(text.split()[0]))] if web_app is None and text.startswith("/") else [],
+                          web_app_data=WebAppData(data=web_app, button_text="secure") if web_app is not None else None)
+        message.set_bot(bot)
+        if callback is not None:
+            query = CallbackQuery(id=str(number), from_user=user, chat_instance="test", data=callback,
+                                  message=reply or message)
+            query.set_bot(bot)
+            update = Update(update_id=number, callback_query=query)
+        else:
+            update = Update(update_id=number, message=message)
+        update.set_bot(bot)
+        with _profile_runtime_scope(self.home):
+            await self.application.process_update(update)
+            if drain:
+                await self.drain()
+        return update
+
     def model_response(self, api_kwargs):
         from openai.types.chat import ChatCompletion
         self.model_inputs.append(json.dumps(api_kwargs, default=str))
@@ -211,10 +346,10 @@ class GatewayHarness:
         message = {"role": "assistant", "content": None if tool else "contract complete"}
         if tool:
             available = {entry.get("function", {}).get("name") for entry in api_kwargs.get("tools", [])}
-            name, arguments = "mail_contract_origin", "{}"
+            name, arguments = self.requested_tool, "{}"
             if name not in available:
                 name = "tool_call"
-                arguments = json.dumps({"calls": [{"name": "mail_contract_origin", "arguments": {}}]})
+                arguments = json.dumps({"calls": [{"name": self.requested_tool, "arguments": {}}]})
             message["tool_calls"] = [{"id": "contract-call", "type": "function",
                                       "function": {"name": name, "arguments": arguments}}]
         return ChatCompletion(id="contract", object="chat.completion", created=1, model="test-only-model",
@@ -287,7 +422,9 @@ class GatewayHarness:
         return self.tool_results[0] if self.tool_results else None
 
     async def drain(self):
-        while tasks := list(getattr(self.adapter, "_background_tasks", ())):
+        while tasks := (list(getattr(self.adapter, "_background_tasks", ())) +
+                        list(getattr(self.adapter, "_pending_text_batch_tasks", {}).values()) +
+                        [task for p in self.profiles.values() for task in p.controller._tasks]):
             await asyncio.wait_for(asyncio.gather(*tasks), 5)
             await asyncio.sleep(0)
 
@@ -295,9 +432,15 @@ class GatewayHarness:
         if self._closed:
             return
         try:
-            tasks = list(getattr(getattr(self, "adapter", None), "_background_tasks", ()))
+            tasks = (list(getattr(getattr(self, "adapter", None), "_background_tasks", ())) +
+                     list(getattr(getattr(self, "adapter", None), "_pending_text_batch_tasks", {}).values()))
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            for profile in self.profiles.values():
+                profile.controller.unload()
+            await asyncio.sleep(0)
+            for profile in self.profiles.values():
+                await profile.controller.runtime.close_profile(profile.broker.profile_home)
         finally:
             self._dispose()

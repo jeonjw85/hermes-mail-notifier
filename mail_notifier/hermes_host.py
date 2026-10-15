@@ -79,6 +79,36 @@ class HermesHost:
         return any(self.ctx.get_config(key, missing) is not missing
                    for key in ("configuration", *dump_settings(Settings())))
 
+    def credential_page_url(self) -> str:
+        # Operator configuration, deliberately outside user-editable Settings.
+        value = self.ctx.get_config("credential_page_url", "")
+        if not isinstance(value, str):
+            raise HostError("invalid_credential_url")
+        return value
+
+    def check_onboarding_compatibility(self) -> None:
+        """Independent native-admission capability gate; no subprocess/network I/O."""
+        try:
+            from hermes_cli.plugins import PluginContext, VALID_HOOKS
+            from gateway.platforms.event import MessageEvent
+            from gateway import session_context
+            from hermes_constants import get_hermes_home
+            from agent.delegation_context import is_delegated_child_process_context
+            if "post_gateway_admission" not in VALID_HOOKS:
+                raise HostError()
+            if not all(callable(getattr(PluginContext, name, None)) for name in
+                       ("register_hook", "register_telegram_handler", "on_unload")):
+                raise HostError()
+            if not {"internal", "raw_message", "allow_gateway_control"} <= set(MessageEvent.__dataclass_fields__):
+                raise HostError()
+            if not all(hasattr(session_context, name) for name in
+                       ("_SESSION_KEY", "_SESSION_MESSAGE_ID", "_SESSION_PLATFORM", "_SESSION_CHAT_TYPE", "_CRON_SESSION")):
+                raise HostError()
+            if not callable(get_hermes_home) or not callable(is_delegated_child_process_context):
+                raise HostError()
+        except Exception:
+            raise HostError("incompatible_hermes_onboarding") from None
+
     def get_password(self, account: Account) -> str:
         try:
             from agent.secret_scope import get_secret

@@ -9,7 +9,12 @@ provides_tools:
   - mail_notifier_feedback
   - mail_notifier_policy
   - mail_notifier_doctor
+  - mail_notifier_setup
 config_schema:
+  credential_page_url:
+    type: string
+    description: "Operator-configured trusted HTTPS credential page. No public deployment is assumed; empty disables secure input only."
+    default: ""
   configuration:
     type: dict
     description: "Atomic settings snapshot. Manage with hermes mail-notifier setup; passwords are secret references only."

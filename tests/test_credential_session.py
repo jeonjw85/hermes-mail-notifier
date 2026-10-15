@@ -86,6 +86,20 @@ class CredentialSessionTests(unittest.TestCase):
         self.assertTrue(retry.duplicate)
         self.assertIsNone(retry.password)
 
+    def test_profile_unload_discards_issued_private_keys(self):
+        challenge = self.sessions.issue(self.binding)
+        self.sessions.close()
+        self.reject(self.payload(challenge))
+
+    def test_adapter_rejections_share_the_credential_submission_budget(self):
+        challenge = self.sessions.issue(self.binding)
+        for _ in range(5):
+            with self.assertRaises(HostError):
+                self.sessions.reject(self.owner)
+        self.reject(self.payload(challenge))
+        self.now += 60
+        self.assertIsNotNone(self.sessions.accept(self.payload(challenge), self.binding, update_key="700:2").password)
+
     def test_challenge_is_public_frozen_and_uses_exact_binding(self):
         challenge = self.sessions.issue(self.binding)
         self.assertEqual(len(decode(challenge.session_id)), 32)
@@ -463,7 +477,8 @@ assert json.loads(tools['mail_notifier_check']({}))['success']
 parser = argparse.ArgumentParser()
 commands['mail-notifier']['setup_fn'](parser)
 assert commands['mail-notifier']['handler_fn'](parser.parse_args(['status','--json'])) == 0
-assert len(tools) == 7
+assert len(tools) == 8
+assert json.loads(tools['mail_notifier_setup']({}))['next_action'] == '/mail'
 print('lazy crypto: registration, check, status and CLI OK')
 '''
             result = subprocess.run([str(runtime / "bin" / "python"), "-I", "-c", script,

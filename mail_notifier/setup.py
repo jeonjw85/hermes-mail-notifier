@@ -183,7 +183,7 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
         draft = service.start(SetupOwner(str(host.home()), "cli"), detected_language=language)
         terminal = _Terminal(host, service, draft, read, read_secret, language)
         terminal.say("setup.title")
-        if draft.state == "scheduled":
+        if draft.state == "scheduled" and draft.steps.get("test_delivery", {}).get("message_id"):
             preview = terminal.preview()
             if terminal.yes("setup.resume"):
                 return terminal.result(service.repair(draft.id, draft.owner, draft.revision, step="cron", resume_cron=True))
@@ -193,7 +193,7 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
                                 current_fingerprint=preview["current_settings_fingerprint"])
             terminal.say("setup.paused_management")
             terminal.draft = service.start(draft.owner, detected_language=language)
-        elif draft.state in {"committing", "repair_required"}:
+        elif draft.state in {"committing", "repair_required", "scheduled"}:
             terminal.preview()
             if not terminal.yes("setup.repair"):
                 return terminal.result(service.preview(draft.id, draft.owner))

@@ -152,6 +152,43 @@ class SetupRecoveryTests(unittest.TestCase):
         self.assertIn("Automatic checks remain paused", self.output.getvalue())
         self.assertNotIn("Setup complete", self.output.getvalue())
 
+    def test_interrupted_scheduled_delivery_can_be_retried_without_resuming_cron(self):
+        from mail_notifier.onboarding_auth import SetupOwner
+        self.host.paused = True
+        with patch.object(self.host, "send", side_effect=SystemExit), self.assertRaises(SystemExit):
+            self.run_setup(["gmail", "me@example.com", "no", "no", "yes"])
+        owner = SetupOwner(str(self.host.home()), "cli")
+        service = self.module.OnboardingService(self.host)
+        draft = service.start(owner)
+        self.assertEqual(draft.state, "scheduled")
+        self.assertEqual(draft.steps["test_delivery"], {"started": True})
+        settings, passwords = self.host.load_settings(), dict(self.host.passwords)
+        events, probes = list(self.host.events), len(self.probes)
+        account = settings.accounts[0]
+        store = self.host.open_store()
+        self.addCleanup(store.close)
+        store.enqueue(account, 7, [101])
+        self.prompts.clear()
+
+        # Approve retrying only the recorded delivery step, never unpausing cron.
+        self.assertEqual(self.run_setup(["yes"], passwords=()), 1)
+        repaired = service.start(owner)
+        self.assertEqual((repaired.id, repaired.state), (draft.id, "scheduled"))
+        self.assertEqual(repaired.steps["test_delivery"]["message_id"], "1")
+        self.assertNotIn("acknowledgement", repaired.steps)
+        self.assertEqual(self.host.load_settings(), settings)
+        self.assertEqual(self.host.passwords, passwords)
+        self.assertEqual(self.host.events, events)
+        self.assertEqual(len(self.probes), probes)
+        self.assertEqual(store.cursor(account.id), (7, 101))
+        self.assertEqual(store.status()["pending"], 1)
+        self.assertTrue(self.host.paused)
+        self.assertTrue(store.get_meta("cron_paused"))
+        self.assertTrue(self.host.deliveries[0][1].endswith(draft.id))
+        self.assertIn("Retry the recorded failed step?", self.prompts[0])
+        self.assertNotIn("setup_changed_retry", self.output.getvalue())
+        self.assertNotIn("Setup complete", self.output.getvalue())
+
     def test_post_publication_conflict_can_be_reviewed_acknowledged_and_restarted(self):
         from mail_notifier.onboarding import OnboardingService
         from mail_notifier.onboarding_auth import SetupOwner

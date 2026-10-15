@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class GatewayHarness:
-    def __init__(self):
+    def __init__(self, *, root=None):
         self._cleanup = ExitStack()
         self._closed = False
         self.network_attempts = []
@@ -28,13 +28,25 @@ class GatewayHarness:
         self._cleanup.callback(self._assert_no_egress)
         self.managers = []
         try:
+            # Host boot may redirect tempfile's process-global cache to this
+            # profile's scratch dir. Restore it when that temporary home closes.
+            self._cleanup.enter_context(patch.object(tempfile, "tempdir", tempfile.tempdir))
             self._guard_network()
-            self.temp = tempfile.TemporaryDirectory(prefix=".mail-telegram-contract-", dir=ROOT.parent)
-            self._cleanup.callback(self.temp.cleanup)
-            self.root = Path(self.temp.name).resolve()
+            if root is None:
+                self.temp = tempfile.TemporaryDirectory(prefix=".mail-telegram-contract-", dir=ROOT.parent)
+                self._cleanup.callback(self.temp.cleanup)
+                root = self.temp.name
+            self.root = Path(root).resolve()
+            # Check child-attempt files before TemporaryDirectory removes them;
+            # the original last callback still catches swallowed parent attempts.
+            self._cleanup.callback(self._assert_no_egress)
             self.home = self.root / ".hermes"
             self.beta_home = self.home / "profiles" / "beta"
-            self.beta_home.mkdir(parents=True)
+            self.beta_home.mkdir(parents=True, exist_ok=True)
+            # The former 100ms test-only cap raced real host rediscovery (103ms
+            # observed under CPU contention). Give real admission 5s, with a
+            # separate drain grace; no retries/receipts or production changes.
+            self.admission_timeout = 5
             self._cleanup.enter_context(patch.dict(os.environ, {
                 "HOME": str(self.root), "HERMES_HOME": str(self.home),
                 "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,
@@ -68,14 +80,16 @@ class GatewayHarness:
             self._cleanup.callback(restore_manager)
             for name, home in (("default", self.home), ("beta", self.beta_home)):
                 with _profile_runtime_scope(home):
-                    (home / "config.yaml").write_text(
-                        "model:\n  provider: openai-api\n  default: test-only-model\n"
-                        "  api_mode: chat_completions\n  base_url: http://127.0.0.1:1/v1\n  context_length: 128000\n"
-                        "auxiliary:\n  title_generation:\n    enabled: false\n"
-                        "platform_toolsets:\n  telegram: [mail_contract, mail_notifier]\n"
-                        "display:\n  tool_progress: off\n  thinking: false\n"
-                        "gateway:\n  unauthorized_dm_behavior: ignore\n", encoding="utf-8")
-                    (home / ".env").write_text("TELEGRAM_ALLOWED_USERS=111\nOPENAI_API_KEY=test-only-key\n", encoding="utf-8")
+                    if not (home / "config.yaml").exists():
+                        (home / "config.yaml").write_text(
+                            "model:\n  provider: openai-api\n  default: test-only-model\n"
+                            "  api_mode: chat_completions\n  base_url: http://127.0.0.1:1/v1\n  context_length: 128000\n"
+                            "auxiliary:\n  title_generation:\n    enabled: false\n"
+                            "platform_toolsets:\n  telegram: [mail_contract, mail_notifier]\n"
+                            "display:\n  tool_progress: off\n  thinking: false\n"
+                            "gateway:\n  unauthorized_dm_behavior: ignore\n", encoding="utf-8")
+                    if not (home / ".env").exists():
+                        (home / ".env").write_text("TELEGRAM_ALLOWED_USERS=111\nOPENAI_API_KEY=test-only-key\n", encoding="utf-8")
                     manager = get_plugin_manager()
                     self.managers.append(manager)
                     self._cleanup.callback(self._release_manager, manager)
@@ -93,7 +107,7 @@ class GatewayHarness:
                     broker = controller.broker
                     original_wait = broker.wait
                     async def short_wait(reference, *, timeout=30, wait=original_wait):
-                        return await wait(reference, timeout=min(timeout, .1))
+                        return await wait(reference, timeout=min(timeout, self.admission_timeout))
                     self.patch(broker, "wait", short_wait)
                     ctx.register_tool(name="mail_contract_origin", toolset="mail_contract", description="Contract probe",
                                       handler=self.origin_tool,
@@ -175,6 +189,9 @@ class GatewayHarness:
     def _assert_no_egress(self):
         with self._network_lock:
             attempts = list(self.network_attempts)
+        child_attempts = getattr(self, "root", ROOT) / "child-egress-attempts.log"
+        if child_attempts.exists():
+            attempts.extend(child_attempts.read_text().splitlines())
         if attempts:
             raise AssertionError("unexpected offline egress: " + ", ".join(attempts))
 
@@ -271,13 +288,166 @@ class GatewayHarness:
             # for denial, never the host authorizer or receipt creation policy.
             original_wait = broker.wait
             async def short_wait(reference, *, timeout=30):
-                return await original_wait(reference, timeout=min(timeout, .1))
+                return await original_wait(reference, timeout=min(timeout, self.admission_timeout))
             self.patch(broker, "wait", short_wait)
             self.profiles[name] = SimpleNamespace(manager=profile.manager, controller=controller,
                                                  broker=broker, module=profile.module)
+            if name == "default":
+                self.broker = broker  # fixture helpers must not reuse the unloaded lease
             if rewire:
                 self.adapter.rewire_plugin_handlers()
         return controller
+
+    def offline_mail_services(self):
+        """Real host secrets/config/cron/reload probe; fake only remote I/O.
+
+        Unlike fake_mail_services (older controller contracts), this fixture is
+        suitable for integration/secrecy proof. Unknown subprocesses fail closed.
+        """
+        import subprocess
+        from gateway.run import _profile_runtime_scope
+        from gateway.status import acquire_gateway_runtime_lock, release_gateway_runtime_lock
+        from tests.support import classification_data
+        from tests.test_service import FakeMailbox
+        # This fixture really runs a gateway. Claim its temporary host runtime
+        # lock so cron's liveness notice never probes live launchd/processes.
+        with _profile_runtime_scope(self.home):
+            if not acquire_gateway_runtime_lock():
+                raise AssertionError("temporary gateway runtime lock unavailable")
+        self._cleanup.callback(release_gateway_runtime_lock)
+        self.imap_probes = []
+        self.external_requests = []
+        self.mailbox_hook = lambda account, password: None
+        self.send_hook = lambda: None
+        self.send_failure = False
+        self.highest = 100
+        self.private_markers = []
+        self.ciphertexts = []
+        for profile in self.profiles.values():
+            module = importlib.import_module(profile.controller.__module__)
+            def mailbox(account, password):
+                self.imap_probes.append(account.id)
+                self.mailbox_hook(account, password)
+                box = FakeMailbox(account)
+                box.highest = self.highest
+                return box
+            self.patch(module, "ImapMailbox", mailbox)
+            def caller(**kwargs):
+                self.external_requests.append(("model", kwargs))
+                return "test", "test", SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                    content=json.dumps(classification_data())))], usage=None)
+            self.patch(profile.controller.ctx.llm, "_sync_caller", caller)
+            with _profile_runtime_scope(Path(profile.broker.profile_home)):
+                profile.controller.ctx.set_config("credential_page_url", "https://operator.example/credential/")
+        original_run = subprocess.run
+        def run(args, **kwargs):
+            if len(args) > 1 and args[1] == "send":
+                if args[2:] != ["--to", args[3], "--file", "-", "--json"] or kwargs.get("timeout") != 30:
+                    raise AssertionError("unexpected send protocol")
+                home = Path(kwargs["env"]["HERMES_HOME"])
+                self.external_requests.append(("send", args, kwargs))
+                if self.send_failure:
+                    return subprocess.CompletedProcess(args, 1, '{"success":false}', "")
+                with (home / "test-deliveries.jsonl").open("a", encoding="utf-8") as file:
+                    file.write(json.dumps({"target": args[3], "text": kwargs["input"]}, ensure_ascii=False) + "\n")
+                    file.flush()
+                    os.fsync(file.fileno())
+                self.send_hook()
+                return subprocess.CompletedProcess(args, 0, '{"success":true,"message_id":"42"}', "")
+            if len(args) == 3 and args[0] == sys.executable and args[1] == "-c" and "'reloadable':" in args[2]:
+                # Run the real clean-child auth reload probe, with a fence before
+                # any host imports. Child attempts survive swallowed exceptions.
+                self.external_requests.append(("reload", args, kwargs))
+                guard = (
+                    "import socket\n"
+                    "def _deny_child_egress(*args, **kwargs):\n"
+                    f"    with open({str(self.root / 'child-egress-attempts.log')!r}, 'a') as f: f.write('child socket egress\\n')\n"
+                    "    raise AssertionError('unexpected child egress')\n"
+                    "for _name in ('getaddrinfo','gethostbyname','gethostbyname_ex','gethostbyaddr','getnameinfo','create_connection'):\n"
+                    "    setattr(socket, _name, _deny_child_egress)\n"
+                    "for _name in ('connect','connect_ex','sendto'):\n"
+                    "    setattr(socket.socket, _name, _deny_child_egress)\n"
+                )
+                return original_run([args[0], args[1], guard + args[2]], **kwargs)
+            # Real host prompt metadata probes are local, read-only, fixed argv.
+            # Permit only these exact commands, not arbitrary Python or a shell.
+            if ((args[0] in {"python", "python3"} and args[1:] in [
+                    ["-c", "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
+                    ["-m", "pip", "--version"],
+                    ["-c", "import os; print('yes' if os.path.exists(os.path.join(os.path.dirname(os.__file__), 'EXTERNALLY-MANAGED')) else 'no')"]])
+                    or args == ["pip", "--version"]):
+                return original_run(args, **kwargs)
+            self._deny_egress("unexpected subprocess")
+        self.patch(subprocess, "run", run)
+
+    def profile_resource(self, name="default"):
+        home = self.home if name == "default" else self.beta_home
+        return self.auth._shared().runtime.profiles[str(home)].resource
+
+    def _set_allowed_users(self, value):
+        from gateway.run import _profile_runtime_scope
+        from hermes_cli.config import save_env_value
+        with _profile_runtime_scope(self.home):
+            # Do not wipe the real final secret store when changing host auth.
+            save_env_value("TELEGRAM_ALLOWED_USERS", value)
+
+    async def secure_preview(self, *, route=None, language="en", password="test-only-integration-password", submit=True):
+        from telegram import ForceReply
+        await self.dispatch_native(route=route, language_code=language)
+        await self.press("Gmail", route=route)
+        prompt = next(message for message, kwargs in reversed(self.native_sent)
+                      if isinstance(kwargs.get("reply_markup"), ForceReply))
+        await self.dispatch_native(text="me@example.invalid", reply=prompt, route=route)
+        await self.press("앱 비밀번호 안전하게 입력" if language == "ko" else "Secure app password", route=route)
+        payload = self.encrypted_payload(password, name="beta" if route == "beta" else "default")
+        if submit:
+            await self.dispatch_native(web_app=payload, route=route)
+        return payload
+
+    def encrypted_payload(self, password, *, name="default"):
+        from urllib.parse import parse_qs, urlsplit
+        from cryptography.hazmat.primitives import serialization
+        from tests.test_credential_session import compact, encrypt
+        markup = next(kwargs["reply_markup"] for _, kwargs in reversed(self.native_sent)
+                      if getattr(kwargs.get("reply_markup"), "keyboard", None))
+        public = {k: v[0] for k, v in parse_qs(parse_qs(urlsplit(markup.keyboard[0][0].web_app.url).fragment)["mn"][0]).items()}
+        binding = json.loads(public["binding"])
+        resource = self.profile_resource(name)
+        key = resource.sessions._sessions[public["session_id"]].private_key
+        self.private_markers.extend([key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                       serialization.NoEncryption()),
+                                     key.private_bytes(serialization.Encoding.DER, serialization.PrivateFormat.PKCS8,
+                                                       serialization.NoEncryption()),
+                                     key.private_numbers().private_value.to_bytes(32, "big")])
+        challenge = SimpleNamespace(**{k: public[k] for k in ("session_id", "server_public_key", "binding")})
+        payload = encrypt(challenge, compact({"password": password, "draft_id": binding[3], "revision": int(binding[4])}).encode())
+        self.ciphertexts.append(payload)
+        return payload
+
+    def assert_secret_free(self, case, passwords, *, captured="", ciphertexts=()):
+        import base64
+        from hermes_logging import flush_log_queue
+        flush_log_queue()
+        if hasattr(captured, "getvalue"):
+            captured = captured.getvalue()
+        sinks = repr((self.events, self.event_objects, self.model_inputs, self.native_sent,
+                      self.tool_results, self.external_requests)).encode() + captured.encode()
+        keys = [encoded for key in self.private_markers for encoded in (key, repr(key).encode(), key.hex().encode(),
+                key.hex().upper().encode(), base64.b64encode(key), base64.urlsafe_b64encode(key).rstrip(b"="))]
+        # PEM can be escaped in JSON/repr or wrapped at 64 columns.
+        keys.extend(line for key in self.private_markers if key.startswith(b"-----BEGIN")
+                    for line in key.splitlines()[1:-1])
+        encrypted = [encoded for payload in [*self.ciphertexts, *ciphertexts]
+                     for encoded in (payload.encode(), json.loads(payload)["ciphertext"].encode())]
+        for marker in [*(p.encode() for p in passwords), *keys, *encrypted]:
+            case.assertNotIn(marker, sinks)
+            for path in self.root.rglob("*"):
+                if not path.is_file():
+                    continue
+                # Only the actual host final credential file may hold passwords.
+                if path in (self.home / ".env", self.beta_home / ".env") and marker in [p.encode() for p in passwords]:
+                    continue
+                case.assertNotIn(marker, path.read_bytes(), str(path.relative_to(self.root)))
 
     def fake_mail_services(self):
         """Only replace the external service boundaries, not admission or config."""
@@ -340,7 +510,7 @@ class GatewayHarness:
         number = self.native_counter
         bot = bot or self.bot
         self.config.profile_routes = [ProfileRoute(name="mail", platform="telegram", profile=route, chat_id=user_id)] if route else []
-        (self.home / ".env").write_text(f"TELEGRAM_ALLOWED_USERS={allowed_users}\nOPENAI_API_KEY=test-only-key\n", encoding="utf-8")
+        self._set_allowed_users(allowed_users)
         user = User(id=int(user_id), first_name="Tester", is_bot=False, language_code=language_code)
         chat = Chat(id=int(user_id) if chat_type == "private" else -123, type=chat_type)
         message = Message(message_id=number, date=datetime.now(timezone.utc), chat=chat, from_user=user,
@@ -405,7 +575,7 @@ class GatewayHarness:
                             value="SECRET-CIPHERTEXT", broker=None):
         from gateway.profile_routing import ProfileRoute
         from gateway.run import _profile_runtime_scope
-        (self.home / ".env").write_text(f"TELEGRAM_ALLOWED_USERS={allowed_users}\nOPENAI_API_KEY=test-only-key\n", encoding="utf-8")
+        self._set_allowed_users(allowed_users)
         self.config.profile_routes = [ProfileRoute(name="mail", platform="telegram", profile=route, chat_id=user_id)] if route else []
         update, bot = self.update(user_id=user_id, bot_id=bot_id, thread_id=thread_id)
         item = self.telegram.native_input(update, bot, kind="web_app", value=value)
@@ -415,7 +585,7 @@ class GatewayHarness:
         # Shorten only the caller's wait, not authorizer, routing or hook dispatch.
         original_wait = broker.wait
         async def wait(reference, *, timeout=30):
-            return await original_wait(reference, timeout=.1)
+            return await original_wait(reference, timeout=min(timeout, self.admission_timeout))
         original_handle = self.adapter.handle_message
         async def capture(event):
             self.event_objects.append(event)
@@ -451,7 +621,9 @@ class GatewayHarness:
         while tasks := (list(getattr(self.adapter, "_background_tasks", ())) +
                         list(getattr(self.adapter, "_pending_text_batch_tasks", {}).values()) +
                         [task for p in self.profiles.values() for task in p.controller._tasks]):
-            await asyncio.wait_for(asyncio.gather(*tasks), 5)
+            # A denied caller must reach its own timeout before the outer drain
+            # cancels it. Equal deadlines race and mask legitimate denial.
+            await asyncio.wait_for(asyncio.gather(*tasks), self.admission_timeout + 5)
             await asyncio.sleep(0)
 
     async def close(self):

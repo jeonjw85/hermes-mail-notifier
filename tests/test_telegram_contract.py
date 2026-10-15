@@ -30,6 +30,33 @@ class TelegramAdmissionContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(self.harness.effects, [])
 
+    async def test_host_scratch_temp_cache_does_not_outlive_the_temporary_gateway(self):
+        import tempfile
+        from pathlib import Path
+        from hermes_constants import export_scratch_tmp_env
+        self.assertTrue(export_scratch_tmp_env())
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertTrue(Path(directory).resolve().is_relative_to(self.harness.root))
+        root = self.harness.root
+        await self.harness.close()
+        # Exercise the next consumer, not merely the tempfile global's value.
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertFalse(Path(directory).resolve().is_relative_to(root))
+
+    async def test_swallowed_child_egress_attempt_is_asserted_before_profile_cleanup(self):
+        import subprocess
+        self.harness.offline_mail_services()
+        # Fence characterization only, NOT an auth/reload/integration proof.
+        # A malicious child swallows the socket denial and reports success.
+        code = ("import socket\ntry: socket.create_connection(('example.invalid', 443))\n"
+                "except AssertionError: pass\nprint({'reloadable': True})\n")
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        root = self.harness.root
+        with self.assertRaisesRegex(AssertionError, "child socket egress"):
+            await self.harness.close()
+        self.assertFalse(root.exists(), "cleanup must finish even when the fence assertion fails")
+
     async def test_routed_profile_and_receiving_bot_survive_real_loader(self):
         from hermes_constants import get_hermes_home
         receipt = await self.harness.submit_native(user_id="111", route="beta", bot_id="700")
@@ -474,6 +501,28 @@ class TelegramAdmissionContractTests(unittest.IsolatedAsyncioTestCase):
         await self.harness.dispatch_native()
         self.assertTrue(any(kwargs.get("reply_markup") for _, kwargs in self.harness.native_sent))
         self.assertNotIn("setup_work_cancelled", repr(self.harness.native_sent))
+
+    async def test_admitted_panel_survives_host_scheduling_delay_on_initial_and_same_client_reload(self):
+        # Characterize the fixture's old 100ms race without altering auth or
+        # manufacturing a receipt: the actual host hook yields before admission.
+        application = self.harness.application
+        for phase in ("initial", "reload"):
+            with self.subTest(phase=phase):
+                if phase == "reload":
+                    self.harness.reload_profile()
+                entered = asyncio.Event()
+                async def delayed_dispatch(**kwargs):
+                    entered.set()
+                    await asyncio.sleep(.2)
+                manager = self.harness.profiles["default"].manager
+                manager._hooks.setdefault("pre_gateway_dispatch", []).append(delayed_dispatch)
+                self.harness.native_sent.clear()
+                await self.harness.dispatch_native()
+                self.assertTrue(entered.is_set())
+                self.assertIs(self.harness.application, application)
+                self.assertTrue(any(kwargs.get("reply_markup") for _, kwargs in self.harness.native_sent),
+                                "authorized intake must tolerate host work beyond 100ms")
+                manager._hooks["pre_gateway_dispatch"].remove(delayed_dispatch)
 
     async def test_same_client_unloaded_guard_blocks_stale_passwords_before_and_after_handoff(self):
         from telegram import ForceReply

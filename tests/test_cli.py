@@ -3,7 +3,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -70,7 +70,7 @@ class SetupHost(FakeHost):
     def get_password(self, account):
         return self.passwords[account.id]
 
-    def install_schedule(self, settings, store):
+    def install_schedule(self, settings, store, *, disable_only=False):
         self.schedule_calls += 1
         if self.cron_failure:
             raise HostError("cron_operation_failed")
@@ -79,6 +79,9 @@ class SetupHost(FakeHost):
             self.paused = bool(job_id)
             store.set_meta("cron_paused", self.paused)
             return job_id
+        if disable_only:
+            store.set_meta("cron_paused", self.paused)
+            return store.get_meta("cron_job_id") or ""
         store.set_meta("cron_job_id", "job1")
         store.set_meta("cron_paused", self.paused)
         self.events.append("cron")
@@ -204,6 +207,28 @@ class CliTests(unittest.TestCase):
         self.assertFalse(self.host.load_settings().accounts[0].enabled)
         self.assertTrue(self.host.paused)
 
+    def test_accounts_cli_disable_during_model_reload_and_delivery_outage_preserves_other_account(self):
+        from mail_notifier.config import Account, secret_name
+        account = self.first_setup()
+        other = Account("other", "Other", "gmail", "other@example.com", secret_name("other"))
+        self.host.settings = replace(self.host.settings, accounts=(account, other))
+        self.host.paused = True
+        parser = argparse.ArgumentParser()
+        self.module.configure_parser(parser)
+        deliveries, model_calls = len(self.host.deliveries), self.host.model_calls
+        with patch.object(self.host, "check_environment", side_effect=HostError("credentials_not_reloadable")), \
+                patch.object(self.host, "complete_structured", side_effect=HostError("model_unavailable")), \
+                patch.object(self.host, "send", side_effect=HostError("delivery_failed")), \
+                redirect_stdout(io.StringIO()) as out:
+            code = self.module.run_cli(parser.parse_args(["accounts", "disable", account.id, "--json"]), self.host)
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertFalse(self.host.settings.accounts[0].enabled)
+        self.assertEqual(self.host.settings.accounts[1], other)
+        self.assertTrue(self.host.paused)
+        self.assertEqual((len(self.host.deliveries), self.host.model_calls), (deliveries, model_calls))
+        with closing(self.host.open_store()) as store:
+            self.assertEqual(store.cursor(account.id), (7, 100))
+
     def test_edit_disabled_account_replaces_password_without_enabling_notifications(self):
         account = self.first_setup()
         self.assertEqual(self.setup_with(["disable", account.id, "done", "no", "yes"]), 0)
@@ -222,6 +247,28 @@ class CliTests(unittest.TestCase):
         self.host.cron_failure = False
         self.assertEqual(self.setup_with(["yes"]), 0)
         self.assertEqual(self.host.settings.accounts[0].id, account_id)
+
+    def test_cli_failed_delivery_handoff_allows_new_confirmed_destination_without_secret(self):
+        self.first_setup()
+        self.host.settings = replace(self.host.settings, target="telegram:-222:3")
+        self.host.paused = True
+        self.host.send_error = True
+        self.assertEqual(self.setup_with(["done", "no", "yes"]), 1)
+        with closing(self.host.open_setup_store()) as store:
+            old_id = store.db.execute("SELECT id FROM drafts WHERE state='repair_required'").fetchone()[0]
+        answers = ["no", "yes", "done", "yes", "telegram:444", "", "", "", "", "", "", "", "", "yes"]
+        self.host.send_error = False
+        with patch("mail_notifier.setup._password", side_effect=AssertionError("secret reentry")):
+            self.assertEqual(self.setup_with(answers), 1)  # Saved, deliberately still paused.
+        self.assertEqual(self.host.settings.target, "telegram:444")
+        self.assertTrue(self.host.paused)
+        with closing(self.host.open_setup_store()) as store:
+            row = store.db.execute("SELECT state, steps_json FROM drafts WHERE id=?", (old_id,)).fetchone()
+            self.assertEqual(row[0], "acknowledged")
+            steps = json.loads(row[1])
+            self.assertEqual(steps["acknowledgement"]["reason"], "unfinished_delivery")
+            self.assertEqual(steps["test_delivery"], {"started": True})
+        self.assertEqual(self.host.events.count("password"), 1)
 
     def test_failed_settings_publish_reports_the_correct_stage(self):
         with patch.object(self.host, "save_settings", side_effect=HostError("settings_save_failed")):

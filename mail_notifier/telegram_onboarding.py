@@ -137,7 +137,9 @@ class TelegramOnboarding:
                                  steps=", ".join(preview["completed_steps"]), next=preview.get("next_action", "/mail"))
         result = views.panel(draft, settings, language=draft.candidate.ui_language, page=page, change_page=change_page,
                              resume_confirmation=resume_confirmation, status=status, footer=footer,
-                             current_fingerprint=preview.get("current_settings_fingerprint"))
+                             current_fingerprint=preview.get("current_settings_fingerprint"),
+                             can_handoff_delivery=preview.get("can_handoff_delivery", False),
+                             disable_only=preview.get("activation_checks") == "not_run_disable_only")
         result["completed_steps"] = preview["completed_steps"]
         result["text"] = views.bounded(result["text"], 3500)
         with _shared().lock:
@@ -280,7 +282,8 @@ class TelegramOnboarding:
                                    resume_cron=operation == "confirm_resume")
                 draft = self._read(resource, draft.id, owner)
             elif operation == "acknowledge":
-                draft = service.acknowledge(draft.id, owner, draft.revision, current_fingerprint=values["current_fingerprint"])
+                draft = service.acknowledge(draft.id, owner, draft.revision, current_fingerprint=values["current_fingerprint"],
+                                            allow_unfinished_delivery=values.get("allow_unfinished_delivery", False))
             elif operation in {"secure", "guide"}:
                 view = self._view(resource, draft)
                 if operation == "guide":
@@ -308,13 +311,17 @@ class TelegramOnboarding:
             draft = service.start(owner, detected_language=item.language_code)
         elif item.kind in {"reply", "oversized_text"}:
             draft = service.start(owner, detected_language=item.language_code)
+            # Transport guards intercept across route changes and reloads, but
+            # only this authenticated profile can interpret its current prompt.
+            if draft.state in {"awaiting_secret", "needs_secret", "validating"} or draft.form.get("action") == "rotate":
+                return {**self._view(resource, draft), "error": "setup_changed_retry"}
             if item.kind == "oversized_text":
                 view = self._view(resource, draft)
                 view["text"] = views.bounded(view["text"] + "\n" + text("telegram.input_limit", view["language"]), 3500)
                 return view
             reply = json.loads(item.value)
             field = draft.form.get("input_field")
-            if (draft.state != "draft" or not field
+            if (draft.state != "draft" or not field or not reply.get("prompt_message_id")
                     or draft.form.get("prompt_message_id") != reply.get("prompt_message_id")):
                 raise HostError("setup_changed_retry")
             value = reply.get("text", "")
@@ -557,15 +564,12 @@ def _install_intake(native, adapter, manager, plugin_name):
             kind, value = "start", ""
         else:
             reply = message.reply_to_message
-            # Retained non-secret markers also discard text during a reload gap.
-            identity = (str(context.bot.id), str(update.effective_user.id), str(message.chat_id), str(message.message_thread_id or ""))
-            if is_waiting(identity):
-                kind, value = "password_text", ""
+            # Retain bounded input only in the native escrow, never in gateway
+            # text. Routed authorization and prompt validation decide its use.
+            if len((message.text or "").encode("utf-8")) > 16 * 1024:
+                kind, value = "oversized_text", ""
             else:
-                if len((message.text or "").encode("utf-8")) > 16 * 1024:
-                    kind, value = "oversized_text", ""
-                else:
-                    kind, value = "reply", json.dumps({"prompt_message_id": str(reply.message_id) if reply else "", "text": message.text or ""}, ensure_ascii=False)
+                kind, value = "reply", json.dumps({"prompt_message_id": str(reply.message_id) if reply else "", "text": message.text or ""}, ensure_ascii=False)
         item = native_input(update, context.bot, kind=kind, value=value)
         if item is not None:
             async def admitted():

@@ -6,8 +6,10 @@ import unittest
 from contextlib import closing
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from mail_notifier.config import Account, Settings, secret_name
+from mail_notifier.hermes_host import HostError
 from mail_notifier.onboarding_auth import AdmissionBroker, NativeInput
 from tests import test_telegram_onboarding as first_run
 
@@ -275,6 +277,36 @@ class TelegramManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.events.count("password"), 0)
         self.assertEqual(self.ready(), before)
 
+    async def test_failed_group_delivery_can_handoff_then_confirm_current_private_destination(self):
+        self.seed()
+        before = self.ready()
+        self.host.paused = True
+        self.host.send_error = True
+        view = await self.act(await self.send("start"), "menu", menu="recovery")
+        partial = await self.act(await self.act(view, "test"), "confirm")
+        self.assertEqual(partial["state"], "repair_required")
+        self.assertIn("telegram:-222:3", partial["text"])
+        handoff = self.actions(partial, "acknowledge")
+        self.assertEqual(len(handoff), 1, "failed delivery must not trap non-secret management")
+        self.assertTrue(handoff[0][1]["values"]["allow_unfinished_delivery"])
+        self.assertIn("unfinished", partial["text"])
+        acknowledged = await self.act(partial, "acknowledge")
+        self.assertEqual(acknowledged["state"], "acknowledged")
+        root = await self.send("start")
+        self.assertNotEqual(root["draft_id"], partial["draft_id"])
+        preview = await self.act(await self.act(root, "menu", menu="settings"), "current_target")
+        self.assertEqual(self.host.settings.target, "telegram:-222:3")
+        self.host.send_error = False
+        saved = await self.act(preview, "confirm")
+        self.assertEqual(saved["state"], "scheduled")
+        self.assertEqual(self.host.settings.target, "telegram:111:9")
+        self.assertTrue(self.host.paused)
+        self.assertEqual(self.ready(), before)
+        with closing(self.host.open_setup_store()) as store:
+            old = store.get(partial["draft_id"], self.owner)
+            self.assertEqual(old.steps["test_delivery"], {"started": True})
+            self.assertEqual(old.steps["error_code"], "delivery_failed")
+
     async def test_long_existing_labels_and_values_are_bounded_for_output_only(self):
         accounts = self.seed(50, schedule="🙂" * 5000, importance_instructions="기존" * 20000)
         self.host.settings = replace(self.host.settings, accounts=tuple(replace(a, label="<img src=x>🙂" * 1000) for a in accounts))
@@ -307,6 +339,40 @@ class TelegramManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("All accounts are disabled", complete["text"])
         self.assertNotIn("model check, schedule and Telegram test verified", complete["text"])
         self.assertEqual(self.host.deliveries, [])
+
+    async def test_disable_one_account_during_outage_needs_confirm_but_no_activation_probes(self):
+        self.seed(2)
+        self.host.paused = True
+        before = self.ready()
+        view = await self.act(await self.send("start"), "account", account_id="a0")
+        preview = await self.act(view, "disable")
+        self.assertTrue(self.host.settings.accounts[0].enabled)
+        self.assertIn("not run", preview["text"])
+        with patch.object(self.host, "check_environment", side_effect=AssertionError("reload outage")), \
+                patch.object(self.host, "complete_structured", side_effect=AssertionError("model outage")), \
+                patch.object(self.host, "send", side_effect=AssertionError("delivery outage")):
+            saved = await self.act(preview, "confirm")
+        self.assertEqual(saved["state"], "scheduled")
+        self.assertFalse(self.host.settings.accounts[0].enabled)
+        self.assertTrue(self.host.settings.accounts[1].enabled)
+        self.assertTrue(self.host.paused)
+        self.assertEqual(self.ready(), before)
+        self.assertIn("not run", saved["text"])
+        self.assertNotIn("Telegram test verified", saved["text"])
+        self.assertFalse(self.actions(saved, "resume"))
+        await self.act(saved, "acknowledge")
+
+    async def test_disable_with_unrelated_draft_target_change_still_requires_activation_preflight(self):
+        self.seed(2)
+        root = await self.send("start")
+        preview = await self.act(await self.act(root, "menu", menu="settings"), "current_target")
+        root = await self.act(preview, "back")
+        preview = await self.act(await self.act(root, "account", account_id="a0"), "disable")
+        with patch.object(self.host, "check_environment", side_effect=HostError("model_unavailable")):
+            failed = await self.act(preview, "confirm")
+        self.assertEqual(failed["state"], "awaiting_confirmation")
+        self.assertTrue(self.host.settings.accounts[0].enabled)
+        self.assertEqual(self.host.settings.target, "telegram:-222:3")
 
     async def test_korean_policy_settings_and_test_panel_use_same_confirmed_path(self):
         self.seed()
@@ -348,6 +414,48 @@ class TelegramManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("external criteria", conflict["text"])
         self.assertIn("candidate criteria", conflict["text"])
         self.assertLessEqual(len(conflict["text"].encode("utf-16-le")) // 2, 3500)
+
+    async def test_conflict_paginates_current_accounts_and_compares_union_by_identity(self):
+        for candidate_count, current_count in ((1, 8), (8, 1)):
+            with self.subTest(candidate=candidate_count, current=current_count):
+                accounts = self.seed(8)
+                self.host.settings = replace(self.host.settings, accounts=accounts[:candidate_count])
+                preview = await self.act(await self.act(await self.send("start"), "menu", menu="language"),
+                                         "setting", field="language", value="en")
+                current_accounts = tuple(reversed(accounts[:current_count]))
+                self.host.settings = replace(self.host.settings, accounts=current_accounts)
+                conflict = await self.act(preview, "confirm")
+                self.assertEqual(conflict["state"], "needs_review")
+                for page in range((current_count + 4) // 5):
+                    for account in current_accounts[page * 5:page * 5 + 5]:
+                        self.assertIn(account.username, conflict["text"])
+                    if page * 5 + 5 < current_count:
+                        conflict = await self.act(conflict, "page", page=page + 1)
+                self.assertFalse(any(r["values"]["page"] > page for _, r in self.actions(conflict, "page")))
+                pages = await self.change_pages(conflict)
+                comparisons = "\n".join(p["text"].split("Changes · Page", 1)[1] for p in pages)
+                for account in accounts[1:]:
+                    self.assertIn(account.username, comparisons)
+                self.assertEqual(comparisons.count("Current only:"), max(0, current_count - candidate_count))
+                self.assertEqual(comparisons.count("Candidate only:"), max(0, candidate_count - current_count))
+                self.assertNotIn("Account state:", comparisons, "reordering must not invent identity changes")
+                for p in pages:
+                    self.assertLessEqual(len(p["text"].encode("utf-16-le")) // 2, 3500)
+                    for button in p["buttons"]:
+                        self.assertRegex(button["callback_data"], r"^mn:[A-Za-z0-9_-]{32}$")
+                resource = self.module.views._shared().runtime.profiles[self.owner.profile_home].resource
+                draft = resource.service.start(self.owner)
+                for selected, expected in ((-100, 1), (100, (current_count + 4) // 5)):
+                    bounded = self.module.views.panel(draft, self.host.settings, language="en", page=selected)
+                    self.assertIn(f"Page {expected}/{(current_count + 4) // 5}", bounded["text"])
+                current = self.host.settings
+                self.host.settings = replace(current, target="telegram:999")
+                rejected = await self.act(pages[-1], "acknowledge")
+                self.assertEqual(rejected["error"], "setup_changed_retry")
+                fresh_review = await self.send("start")
+                await self.act(fresh_review, "acknowledge")
+                self.assertEqual(self.host.settings.accounts, current_accounts)
+                self.assertEqual(self.host.events, [])
 
     async def pending_policy_preview(self, count=1, language="en"):
         fields = ("important_senders", "ignored_senders", "always_notify_senders", "important_keywords")

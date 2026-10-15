@@ -79,6 +79,23 @@ class OnboardingProcessRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.deliveries()), 1)
         self.audit()
 
+    def test_recovery_assertion_rejects_orphan_cursor_and_disabled_active_settings(self):
+        from mail_notifier.config import secret_name
+        from ruamel.yaml import YAML
+        self.crash_at("completed")
+        yaml = YAML()
+        path = self.home / "config.yaml"
+        data = yaml.load(path)
+        account = data["plugins"]["entries"]["hermes-mail-notifier"]["settings"]["configuration"]["accounts"][0]
+        original_id = account["id"]
+        for changes in ({"id": "orphanreplacement"}, {"id": original_id, "enabled": False}):
+            with self.subTest(changes=changes):
+                account.update(changes)
+                account["password_secret"] = secret_name(account["id"])
+                yaml.dump(data, path)
+                with self.assertRaisesRegex(AssertionError, "resumed settings changed account identity/enabled state"):
+                    self.worker("resume")
+
     def test_each_publication_boundary_reopens_files_releases_locks_and_only_ambiguous_send_repeats(self):
         points = (
             ("validated_before_confirmation", "needs_secret", None),

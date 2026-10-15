@@ -60,7 +60,7 @@ def _steps(value):
     result = {}
     if "acknowledgement" in value:
         entry = _object(value["acknowledgement"], {"reason", "settings_fingerprint"})
-        if (entry.get("reason") not in ("paused", "conflict")
+        if (entry.get("reason") not in ("paused", "conflict", "unfinished_delivery")
                 or not _matches(entry.get("settings_fingerprint"), r"[a-f0-9]{64}")):
             _invalid()
         result["acknowledgement"] = dict(entry)

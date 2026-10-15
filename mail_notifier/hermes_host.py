@@ -368,9 +368,16 @@ class HermesHost:
         store.set_meta("cron_job_id", job_id)
         store.set_meta("cron_paused", False)
 
-    def install_schedule(self, settings: Settings, store: Store) -> str:
+    def install_schedule(self, settings: Settings, store: Store, *, disable_only: bool = False) -> str:
         script = self.home() / "scripts" / "hermes-mail-notifier.py"
         existing = self._owned_schedule()
+        if disable_only and any(account.enabled for account in settings.accounts):
+            # Reducing enabled sources must not activate an absent job. No
+            # schedule/destination change belongs to a disable-only snapshot.
+            job_id = existing["job_id"] if existing else ""
+            store.set_meta("cron_job_id", job_id or None)
+            store.set_meta("cron_paused", bool(existing and (existing.get("enabled") is False or existing.get("state") == "paused")))
+            return job_id
         if not any(account.enabled for account in settings.accounts):
             if existing:
                 self.manage_cron("pause", job_id=existing["job_id"])

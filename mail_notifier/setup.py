@@ -152,13 +152,16 @@ class _Terminal:
             settings = self.draft.candidate
 
     def preview(self):
-        self.say("setup.preview")
         preview = self.service.preview(self.draft.id, self.draft.owner)
+        self.say("setup.disable_only" if preview.get("activation_checks") == "not_run_disable_only" else "setup.preview")
         print(json.dumps(preview, ensure_ascii=False, indent=2))
         return preview
 
     def result(self, result):
         if result["state"] == "completed":
+            if result.get("activation_checks") == "not_run_disable_only":
+                self.say("telegram.disabled_saved")
+                return 0
             self.say("setup.completed", job=result.get("cron_job_id") or text("status.none", self.language))
             self.say("setup.policy", version=POLICY_VERSION)
             self.say("setup.retention")
@@ -183,9 +186,10 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
         draft = service.start(SetupOwner(str(host.home()), "cli"), detected_language=language)
         terminal = _Terminal(host, service, draft, read, read_secret, language)
         terminal.say("setup.title")
-        if draft.state == "scheduled" and draft.steps.get("test_delivery", {}).get("message_id"):
+        disable_only = service.preview(draft.id, draft.owner).get("activation_checks") == "not_run_disable_only"
+        if draft.state == "scheduled" and (draft.steps.get("test_delivery", {}).get("message_id") or disable_only):
             preview = terminal.preview()
-            if terminal.yes("setup.resume"):
+            if not disable_only and terminal.yes("setup.resume"):
                 return terminal.result(service.repair(draft.id, draft.owner, draft.revision, step="cron", resume_cron=True))
             if not terminal.yes("setup.continue_paused"):
                 return terminal.result(service.preview(draft.id, draft.owner))
@@ -194,11 +198,18 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
             terminal.say("setup.paused_management")
             terminal.draft = service.start(draft.owner, detected_language=language)
         elif draft.state in {"committing", "repair_required", "scheduled"}:
-            terminal.preview()
-            if not terminal.yes("setup.repair"):
-                return terminal.result(service.preview(draft.id, draft.owner))
-            step = "test_delivery" if "cron" in draft.steps else "cron" if "settings_fingerprint" in draft.steps else "settings"
-            return terminal.result(service.repair(draft.id, draft.owner, draft.revision, step=step))
+            preview = terminal.preview()
+            if terminal.yes("setup.repair"):
+                step = "test_delivery" if "cron" in draft.steps else "cron" if "settings_fingerprint" in draft.steps else "settings"
+                return terminal.result(service.repair(draft.id, draft.owner, draft.revision, step=step))
+            if not preview.get("can_handoff_delivery"):
+                return terminal.result(preview)
+            terminal.say("setup.unfinished_delivery")
+            if not terminal.yes("setup.continue_unfinished"):
+                return terminal.result(preview)
+            service.acknowledge(draft.id, draft.owner, draft.revision,
+                                current_fingerprint=preview["current_settings_fingerprint"], allow_unfinished_delivery=True)
+            terminal.draft = service.start(draft.owner, detected_language=language)
         if draft.state == "needs_review":
             preview = terminal.preview()
             terminal.say("setup.review_external")

@@ -431,7 +431,7 @@ class GatewayHarness:
         if hasattr(captured, "getvalue"):
             captured = captured.getvalue()
         sinks = repr((self.events, self.event_objects, self.model_inputs, self.native_sent,
-                      self.tool_results, self.external_requests)).encode() + captured.encode()
+                      self.sent, self.callback_answers, self.tool_results, self.external_requests)).encode() + captured.encode()
         keys = [encoded for key in self.private_markers for encoded in (key, repr(key).encode(), key.hex().encode(),
                 key.hex().upper().encode(), base64.b64encode(key), base64.urlsafe_b64encode(key).rstrip(b"="))]
         # PEM can be escaped in JSON/repr or wrapped at 64 columns.
@@ -472,7 +472,10 @@ class GatewayHarness:
                 self.mail_effects.append((str(host.home()), "password", threading.get_ident()))
             def get_password(host, account):
                 return self.mail_passwords[(str(host.home()), account.id)]
-            def schedule(host, settings, store):
+            def schedule(host, settings, store, *, disable_only=False):
+                if disable_only and any(a.enabled for a in settings.accounts):
+                    store.set_meta("cron_paused", self.cron_paused)
+                    return store.get_meta("cron_job_id") or ""
                 self.mail_scopes.append(host.ctx._manager.scope_key)
                 self.mail_effects.append((str(host.home()), "cron", threading.get_ident()))
                 store.set_meta("cron_paused", self.cron_paused)

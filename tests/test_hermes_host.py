@@ -85,6 +85,17 @@ class HermesHostTests(unittest.TestCase):
         self.assertEqual(self.host.load_settings(), self.settings)
         self.assertEqual(self.ctx.settings, {"configuration": dump_settings(self.settings)})
 
+    def test_disable_only_schedule_reconciliation_never_creates_or_resumes_a_job(self):
+        self.assertEqual(self.host.install_schedule(self.settings, self.store, disable_only=True), "")
+        self.assertEqual(self.ctx.jobs, [])
+        job = self.host.install_schedule(self.settings, self.store)
+        self.ctx.jobs[0]["enabled"] = False
+        self.ctx.calls.clear()
+        self.assertEqual(self.host.install_schedule(self.settings, self.store, disable_only=True), job)
+        self.assertEqual([call["action"] for call in self.ctx.calls], ["list"])
+        self.assertTrue(self.store.get_meta("cron_paused"))
+        self.assertFalse(self.ctx.jobs[0]["enabled"])
+
     def test_saved_settings_distinguish_defaults_empty_snapshots_and_legacy_values(self):
         self.assertFalse(self.host.has_saved_settings())
         for saved in ({"configuration": {}}, {"configuration": dump_settings(Settings())},

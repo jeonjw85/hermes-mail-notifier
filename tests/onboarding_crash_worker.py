@@ -58,7 +58,13 @@ async def run(path, point, rotation=False):
                         version = store.db.execute("PRAGMA user_version").fetchone()[0]
                     with closing(resource.host.open_store()) as store:
                         cursor = store.cursor(attempt["account_id"])
+                    accounts = [{"account_id": a.id, "enabled": a.enabled} for a in resource.host.load_settings().accounts]
+                    expected = ([{"account_id": attempt["account_id"], "enabled": attempt["enabled"]}]
+                                if result["state"] == "completed" else attempt["original_accounts"])
+                    if accounts != expected:
+                        raise AssertionError("resumed settings changed account identity/enabled state; cursor alone is insufficient")
                     return {**result, "steps": saved.steps, "setup_version": version, "cursor": cursor,
+                            "settings_accounts": accounts,
                             "cron_count": len(resource.host.manage_cron("list", include_disabled=True)["jobs"]),
                             "pending_secrets": len(resource.service._secrets), "lock_acquired": True}
                 result = await h.profiles["beta"].controller.runtime.submit(receipt, recover)
@@ -86,7 +92,10 @@ async def run(path, point, rotation=False):
                 raise AssertionError("worker not admitted by actual host")
             def attempt_info():
                 draft = resource.service.start(receipt.owner)
-                return {"draft_id": draft.id, "account_id": draft.candidate.accounts[0].id}
+                return {"draft_id": draft.id, "account_id": draft.candidate.accounts[0].id,
+                        "enabled": draft.candidate.accounts[0].enabled,
+                        "original_accounts": [{"account_id": a.id, "enabled": a.enabled}
+                                              for a in resource.host.load_settings().accounts]}
             attempt = await h.profiles["beta"].controller.runtime.submit(receipt, attempt_info)
             (h.root / "attempt.json").write_text(json.dumps(attempt))
 

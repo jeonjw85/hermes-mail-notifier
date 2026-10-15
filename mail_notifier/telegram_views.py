@@ -92,14 +92,15 @@ def _account(account, language):
 
 
 def panel(draft, settings, *, language: str, page: int = 0, change_page: int = 0, resume_confirmation=False,
-          status=None, current_fingerprint=None, footer="") -> dict:
+          status=None, current_fingerprint=None, can_handoff_delivery=False, disable_only=False, footer="") -> dict:
     language = resolve_ui_language(explicit=language)
     view = {"text": "Mail Notifier\n", "buttons": [], "input_field": None, "language": language}
     if draft is None:
         view["text"] += text("telegram.entry", language)
         return view
     candidate = draft.candidate
-    page = max(0, min(page, max(0, (len(candidate.accounts) - 1) // 5)))
+    page_accounts = settings.accounts if draft.state == "needs_review" else candidate.accounts
+    page = max(0, min(page, max(0, (len(page_accounts) - 1) // 5)))
     view.update(draft_id=draft.id, revision=draft.revision, state=draft.state)
     def add(key, action, **values):
         view["buttons"].append(button(draft, text("telegram." + key, language), action, **values))
@@ -108,7 +109,7 @@ def panel(draft, settings, *, language: str, page: int = 0, change_page: int = 0
     def pages():
         if page:
             add("previous_page", "page", page=page - 1, change_page=change_page)
-        if (page + 1) * 5 < len(candidate.accounts):
+        if (page + 1) * 5 < len(page_accounts):
             add("next_page", "page", page=page + 1, change_page=change_page)
     def changes(*, original=None, tail=""):
         rows = _changes(draft, language, original=original)
@@ -139,6 +140,8 @@ def panel(draft, settings, *, language: str, page: int = 0, change_page: int = 0
     state = draft.state
     if state in {"completed", "cancelled", "expired", "acknowledged"}:
         key = "all_disabled" if state == "completed" and not any(a.enabled for a in candidate.accounts) else state
+        if state == "completed" and disable_only and key != "all_disabled":
+            key = "disabled_saved"
         view["text"] += text("telegram." + key, language)
         return finish()
     if resume_confirmation:
@@ -160,22 +163,29 @@ def panel(draft, settings, *, language: str, page: int = 0, change_page: int = 0
         if not paused and draft.steps.get("cron", {}).get("paused"):
             view["text"] += "\n" + text("telegram.paused", language)
         view["text"] += "\n" + _settings(candidate, language, page)
+        if disable_only:
+            view["text"] += "\n" + text("setup.disable_only", language)
         view["text"] += "\n" + text("telegram.steps", language, steps=", ".join(sorted(draft.steps)))
         if draft.steps.get("error_code"):
             view["text"] += "\n" + text("telegram.error", language, code=draft.steps["error_code"])
         if paused:
-            add("resume", "resume")
-            if draft.steps.get("test_delivery", {}).get("message_id"):
+            if not disable_only:
+                add("resume", "resume")
+            if draft.steps.get("test_delivery", {}).get("message_id") or disable_only:
                 add("keep_paused", "acknowledge", current_fingerprint=current_fingerprint or settings_fingerprint(settings))
             else:
                 add("repair", "repair", step="test_delivery")
         else:
             step = "test_delivery" if "cron" in draft.steps else "cron" if "settings_fingerprint" in draft.steps else "settings"
             add("repair", "repair", step=step)
+        if can_handoff_delivery:
+            view["text"] += "\n" + text("setup.unfinished_delivery", language)
+            add("handoff_delivery", "acknowledge", current_fingerprint=current_fingerprint,
+                allow_unfinished_delivery=True)
         pages()
         return finish()
     if state == "awaiting_confirmation":
-        view["text"] += text("setup.preview", language) + "\n" + _settings(candidate, language, page)
+        view["text"] += text("setup.disable_only" if disable_only else "setup.preview", language) + "\n" + _settings(candidate, language, page)
         tail = ""
         if draft.form.get("action") == "resume":
             tail += "\n" + text("setup.resume", language)
@@ -292,10 +302,15 @@ def _changes(draft, language, *, original=None):
         if before != after:
             lines.append(text("setup." + name, language) + ": " + _value(before) + " → " + _value(after))
     accounts = {a.id: a for a in base.accounts}
-    for account in draft.candidate.accounts:
-        old = accounts.get(account.id)
+    candidates = {a.id: a for a in draft.candidate.accounts}
+    for identifier in dict.fromkeys([*accounts, *candidates]):
+        old, account = accounts.get(identifier), candidates.get(identifier)
         if old and old != account:
-            for name in ("label", "username", "mailbox", "enabled"):
+            if account is None:
+                lines.append(text("telegram.current_only_connection", language) + " " + _account(old, language)
+                             + " · " + text("telegram." + old.provider, language) + " · " + bounded(old.mailbox))
+                continue
+            for name in ("label", "provider", "username", "mailbox", "enabled"):
                 if getattr(old, name) != getattr(account, name):
                     label = text("telegram.account_state" if name == "enabled" else "setup." + name, language)
                     before, after = getattr(old, name), getattr(account, name)
@@ -303,8 +318,8 @@ def _changes(draft, language, *, original=None):
                         before = text("status.enabled" if before else "status.disabled", language)
                         after = text("status.enabled" if after else "status.disabled", language)
                     lines.append(_account(account, language) + "\n" + label + ": " + _value(before) + " → " + _value(after))
-        elif not old:
-            lines.append(text("telegram.new_connection", language) + " " + _account(account, language)
+        elif account is not None and not old:
+            lines.append(text("telegram.new_connection" if original is None else "telegram.candidate_only_connection", language) + " " + _account(account, language)
                          + " · " + text("telegram." + account.provider, language) + " · " + bounded(account.mailbox))
     if any(a.id not in accounts for a in draft.candidate.accounts) and any(not a.enabled and accounts.get(a.id, a).enabled for a in draft.candidate.accounts):
         lines.append(text("setup.identity_changed", language))

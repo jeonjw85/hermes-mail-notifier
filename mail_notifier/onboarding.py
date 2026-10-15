@@ -179,6 +179,20 @@ class OnboardingService:
         return ((actual != draft.original and not (self._has_writes(draft) and actual == draft.candidate))
                 or ("settings_fingerprint" in draft.steps and actual != draft.candidate))
 
+    def _disable_only(self, draft):
+        original, candidate = draft.original, draft.candidate
+        if (draft.steps.get("credentials") or len(original.accounts) != len(candidate.accounts)
+                or not any(a.enabled and not b.enabled for a, b in zip(original.accounts, candidate.accounts))):
+            return False
+        # The initial UI locale proposal is not an activation change. All other
+        # fields, identities and ordering must be unchanged; never bypass checks
+        # for an activation or an unrelated pending settings/credential change.
+        ui_language = original.ui_language or candidate.ui_language
+        if replace(candidate, accounts=original.accounts) != replace(original, ui_language=ui_language):
+            return False
+        return all(b == replace(a, enabled=b.enabled) and not (b.enabled and not a.enabled)
+                   for a, b in zip(original.accounts, candidate.accounts))
+
     def change(self, draft_id: str, owner: SetupOwner, revision: int, *, action: str, values: dict) -> SetupDraft:
         draft = self._read(draft_id, owner, revision)
         if draft.state in _TERMINAL or draft.state == "needs_review" or self._has_writes(draft):
@@ -286,10 +300,10 @@ class OnboardingService:
             if draft.state == "awaiting_confirmation" and not self._ready(draft):
                 draft = self._save(draft, state="needs_secret", form={**draft.form, "account_id": self._missing_account(draft)})
         result = {**self._result(draft), **self._display_settings(draft.candidate)}
-        if draft.state in {"needs_review", "scheduled"}:
+        if draft.state in {"needs_review", "scheduled", "repair_required"}:
             current = self.host.load_settings()
             result.update(current_settings=self._display_settings(current), current_settings_fingerprint=settings_fingerprint(current),
-                          recorded_steps=copy.deepcopy(draft.steps))
+                          recorded_steps=copy.deepcopy(draft.steps), can_handoff_delivery=self._unfinished_delivery(draft, current))
         return result
 
     def _display_settings(self, settings):
@@ -314,6 +328,8 @@ class OnboardingService:
         if delivery.get("message_id"):
             completed.append("test_delivery")
         result = {"draft_id": draft.id, "revision": draft.revision, "state": draft.state, "completed_steps": completed}
+        if self._disable_only(draft):
+            result["activation_checks"] = "not_run_disable_only"
         if "error_code" in steps:
             result["error"] = steps["error_code"]
         if "cron" in steps:
@@ -321,7 +337,7 @@ class OnboardingService:
         if delivery.get("message_id"):
             result["message_id"] = delivery["message_id"]
         if draft.state == "scheduled" and steps.get("cron", {}).get("paused"):
-            result["next_action"] = "resume_cron"
+            result["next_action"] = "acknowledge_restart" if self._disable_only(draft) else "resume_cron"
         elif draft.state == "needs_review":
             result["next_action"] = "acknowledge_restart"
         elif draft.state in {"needs_secret", "awaiting_secret"}:
@@ -344,12 +360,21 @@ class OnboardingService:
             raise HostError("setup_already_committing")
         return self._save(draft, state="cancelled")
 
-    def acknowledge(self, draft_id: str, owner: SetupOwner, revision: int, *, current_fingerprint: str) -> SetupDraft:
+    def _unfinished_delivery(self, draft, current):
+        return (draft.state in {"repair_required", "scheduled"} and current == draft.candidate
+                and draft.steps.get("settings_fingerprint") == settings_fingerprint(current)
+                and "cron" in draft.steps and draft.steps.get("test_delivery", {}).get("started") is True
+                and not draft.steps["test_delivery"].get("message_id"))
+
+    def acknowledge(self, draft_id: str, owner: SetupOwner, revision: int, *, current_fingerprint: str,
+                    allow_unfinished_delivery: bool = False) -> SetupDraft:
         """Release an attempt after explicit review, retaining all write evidence.
 
         This neither completes automation nor rolls anything back. A subsequent
         start uses current settings and needs its own preview/confirmation.
         """
+        if type(allow_unfinished_delivery) is not bool:
+            raise HostError("invalid_setup_action")
         draft = self._read(draft_id, owner, revision)
         with closing(self.host.open_store()) as store, store.run_lock() as acquired:
             if not acquired:
@@ -360,10 +385,11 @@ class OnboardingService:
                 raise HostError("setup_changed_retry")
             paused = (draft.state == "scheduled" and current == draft.candidate
                       and "settings_fingerprint" in draft.steps and draft.steps.get("cron", {}).get("paused")
-                      and bool(draft.steps.get("test_delivery", {}).get("message_id")))
-            if draft.state != "needs_review" and not paused:
+                      and (bool(draft.steps.get("test_delivery", {}).get("message_id")) or self._disable_only(draft)))
+            unfinished = allow_unfinished_delivery and self._unfinished_delivery(draft, current)
+            if draft.state != "needs_review" and not paused and not unfinished:
                 raise HostError("setup_changed_retry")
-            steps = {**draft.steps, "acknowledgement": {"reason": "paused" if paused else "conflict",
+            steps = {**draft.steps, "acknowledgement": {"reason": "unfinished_delivery" if unfinished else "paused" if paused else "conflict",
                                                        "settings_fingerprint": current_fingerprint}}
             return self._save(draft, state="acknowledged", steps=steps)
 
@@ -383,6 +409,10 @@ class OnboardingService:
             raise HostError("setup_confirmation_required")
         if self.host.load_settings() != draft.original:
             return self._result(self._save(draft, state="needs_review"))
+        if self._disable_only(draft):
+            if resume_cron:
+                raise HostError("setup_confirmation_required")
+            return self._publish(draft, {}, resume_cron=False)
         snapshots = {}
         try:
             self.host.check_compatibility()
@@ -416,6 +446,8 @@ class OnboardingService:
             return self._result(draft)
         if draft.state in _TERMINAL:
             raise HostError("setup_changed_retry")
+        if self._disable_only(draft) and resume_cron:
+            raise HostError("setup_confirmation_required")
         if not self._has_writes(draft):
             raise HostError("setup_confirmation_required")
         if draft.state == "needs_review":
@@ -502,7 +534,10 @@ class OnboardingService:
                         self._forget(draft.id)
                     if "cron" not in steps or resume_cron or refresh_cron:
                         self._check_active()
-                        job_id = self.host.install_schedule(draft.candidate, store)
+                        if self._disable_only(draft):
+                            job_id = self.host.install_schedule(draft.candidate, store, disable_only=True)
+                        else:
+                            job_id = self.host.install_schedule(draft.candidate, store)
                         if resume_cron and job_id and any(a.enabled for a in draft.candidate.accounts):
                             self.host.resume_schedule(job_id, store)
                         steps["cron"] = {"paused": bool(store.get_meta("cron_paused"))}
@@ -518,7 +553,8 @@ class OnboardingService:
                     return self._result(self._failure(draft, exc, state="needs_secret" if ambiguous else "repair_required"))
         # Sending is deliberately outside the queue lock. A lost response can
         # duplicate this test on retry; use the same attempt ID in its text.
-        if not draft.steps.get("test_delivery", {}).get("message_id") and any(a.enabled for a in draft.candidate.accounts):
+        if (not self._disable_only(draft) and not draft.steps.get("test_delivery", {}).get("message_id")
+                and any(a.enabled for a in draft.candidate.accounts)):
             steps = copy.deepcopy(draft.steps)
             steps["test_delivery"] = {"started": True}
             draft = self._save(draft, steps=steps)

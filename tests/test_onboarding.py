@@ -493,6 +493,54 @@ class OnboardingTests(unittest.TestCase):
                                      current_fingerprint=settings_fingerprint(self.host.load_settings()))
         self.assertEqual(self.stored(draft), draft)
 
+    def test_explicit_unfinished_delivery_handoff_retains_evidence_and_requires_fresh_confirmation(self):
+        self.host.paused = True
+        self.host.send_error = True
+        draft = self.validated()
+        self.assertEqual(self.commit(draft)["state"], "repair_required")
+        draft = self.stored(draft)
+        preview = self.service.preview(draft.id, self.owner)
+        self.assertTrue(preview.get("can_handoff_delivery"))
+        events, passwords = list(self.host.events), dict(self.host.passwords)
+        fingerprint = preview["current_settings_fingerprint"]
+        for owner, revision, reviewed in ((replace(self.owner, user_id="other"), draft.revision, fingerprint),
+                                          (self.owner, draft.revision - 1, fingerprint),
+                                          (self.owner, draft.revision, "0" * 64)):
+            with self.assertRaises(HostError):
+                self.service.acknowledge(draft.id, owner, revision, current_fingerprint=reviewed,
+                                         allow_unfinished_delivery=True)
+        acknowledged = self.service.acknowledge(draft.id, self.owner, draft.revision, current_fingerprint=fingerprint,
+                                               allow_unfinished_delivery=True)
+        self.assertEqual(acknowledged.state, "acknowledged")
+        self.assertEqual(acknowledged.steps["acknowledgement"]["reason"], "unfinished_delivery")
+        self.assertEqual({k: v for k, v in acknowledged.steps.items() if k != "acknowledgement"}, draft.steps)
+        self.assertNotIn("message_id", acknowledged.steps["test_delivery"])
+        self.assertEqual((self.host.events, self.host.passwords), (events, passwords))
+        self.assertTrue(self.host.paused)
+        self.service = self.new_service()
+        fresh = self.service.start(self.owner)
+        self.assertNotEqual(fresh.id, draft.id)
+        self.assertEqual(fresh.original, draft.candidate)
+        fresh = self.change(fresh, "settings", target="telegram:444")
+        self.assertEqual(self.host.load_settings().target, draft.candidate.target)
+        self.host.send_error = False
+        self.assertEqual(self.commit(fresh)["state"], "scheduled")
+        self.assertEqual(self.host.load_settings().target, "telegram:444")
+        self.assertTrue(self.host.paused)
+        self.assertEqual(self.host.events.count("password"), 1)
+        self.assertEqual(self.probes, [draft.candidate.accounts[0].id] * 2)
+
+    def test_unfinished_delivery_handoff_does_not_cover_other_partial_writes(self):
+        self.host.cron_failure = True
+        draft = self.validated()
+        self.commit(draft)
+        draft = self.stored(draft)
+        self.assertFalse(self.service.preview(draft.id, self.owner).get("can_handoff_delivery"))
+        with self.assertRaisesRegex(HostError, "setup_changed_retry"):
+            self.service.acknowledge(draft.id, self.owner, draft.revision,
+                                     current_fingerprint=settings_fingerprint(self.host.load_settings()),
+                                     allow_unfinished_delivery=True)
+
     def test_start_reconciles_paused_settings_conflict_and_acknowledgement_binds_review(self):
         self.host.paused = True
         draft = self.validated()
@@ -559,6 +607,15 @@ class OnboardingTests(unittest.TestCase):
         self.assertFalse(self.host.load_settings().accounts[0].enabled)
         self.assertEqual(store.cursor(account.id), (7, 101))
         self.assertEqual(store.status()["pending"], 1)
+
+    def test_disable_only_cannot_resume_without_a_new_activation_preview(self):
+        self.commit(self.validated())
+        self.host.paused = True
+        draft = self.service.start(self.owner)
+        draft = self.change(draft, "disable", account_id=draft.candidate.accounts[0].id)
+        with self.assertRaisesRegex(HostError, "setup_confirmation_required"):
+            self.commit(draft, resume_cron=True)
+        self.assertTrue(self.host.load_settings().accounts[0].enabled)
 
     def test_disabled_replacement_requires_reentry_after_cache_loss_and_explicit_disable_discards_it(self):
         self.commit(self.validated())

@@ -8,6 +8,8 @@ import os
 import threading
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
+from dataclasses import replace
+from unittest.mock import patch
 
 from tests.telegram_support import GatewayHarness
 
@@ -49,10 +51,15 @@ class OnboardingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         for route, language, confirmation in ((None, "en", "Start with these settings"), ("beta", "ko", "이 설정으로 시작")):
             with self.subTest(language=language):
                 password = "test-only-SENTINEL-" + language
+                requests_before, panels_before = len(h.model_inputs), len(h.native_sent)
                 await h.dispatch_native(text="메일 연결해줘" if language == "ko" else "Connect my email",
                                         route=route, language_code=language)
-                self.assertTrue(any("panel_opening" in value for value in h.model_inputs),
+                self.assertTrue(any(message.get("role") == "tool" and "panel_opening" in message.get("content", "")
+                                    for value in h.model_inputs[requests_before:] for message in json.loads(value)["messages"]),
                                 "real tool result must return through the host model conversation")
+                self.assertTrue(any(("메일 연결 · 서비스를 선택하세요." if language == "ko" else "Connect email · Choose your service.")
+                                    in kwargs["text"] for _, kwargs in h.native_sent[panels_before:]),
+                                "this locale's natural-language tool must open its own localized panel before /mail")
                 payload = await h.secure_preview(route=route, language=language, password=password)
                 home = h.beta_home if route else h.home
                 self.assertNotIn(password, (home / ".env").read_text())
@@ -267,4 +274,83 @@ class OnboardingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(r.host.manage_cron("list", include_disabled=True)["jobs"][0]["enabled"])
             return {"state": draft.state}
         self.assertEqual(await self.inspect(inspect), {"state": "acknowledged"})
+        self.audit([password], [payload])
+
+    async def test_delivery_handoff_preserves_real_write_evidence_and_repairs_destination_from_private_chat(self):
+        h = self.harness
+        password = "test-only-SENTINEL-destination-handoff"
+        payload = await h.secure_preview(password=password)
+        await h.press("Start with these settings")
+        def fail_group(r, owner):
+            r.host.save_settings(replace(r.host.load_settings(), target="telegram:-222:3"))
+            job = r.host.manage_cron("list", include_disabled=True)["jobs"][0]["job_id"]
+            r.host.manage_cron("pause", job_id=job)
+            draft = r.service.start(owner)
+            draft = r.service.change(draft.id, owner, draft.revision, action="settings", values={"ui_language": "en"})
+            return r.service.commit(draft.id, owner, draft.revision)
+        h.send_failure = True
+        failed = await self.inspect(fail_group)
+        self.assertEqual(failed["state"], "repair_required")
+        probes = len(h.imap_probes)
+        await h.dispatch_native()
+        await h.press("Continue management (test unfinished)")
+        await h.dispatch_native()
+        await h.press("Notification settings")
+        await h.press("Use this private chat for new notifications")
+        self.assertEqual((await self.inspect(lambda r, o: {"target": r.host.load_settings().target}))["target"], "telegram:-222:3")
+        h.send_failure = False
+        await h.press("Start with these settings")
+        def verify(r, owner):
+            with closing(r.host.open_setup_store()) as store:
+                old = store.get(failed["draft_id"], owner)
+                self.assertEqual(old.state, "acknowledged")
+                self.assertEqual(old.steps["acknowledgement"]["reason"], "unfinished_delivery")
+                self.assertEqual(old.steps["test_delivery"], {"started": True})
+                self.assertEqual(old.steps["error_code"], "delivery_failed")
+            self.assertEqual(r.host.load_settings().target, "telegram:111")
+            self.assertFalse(r.host.manage_cron("list", include_disabled=True)["jobs"][0]["enabled"])
+            return {}
+        await self.inspect(verify)
+        self.assertEqual(len(h.imap_probes), probes)
+        self.audit([password], [payload])
+
+    async def test_native_disable_only_during_outage_preserves_real_cron_pause_and_account_cursors(self):
+        from mail_notifier.hermes_host import HostError
+        h = self.harness
+        password = "test-only-SENTINEL-disable-outage"
+        payload = await h.secure_preview(password=password)
+        await h.press("Start with these settings")
+        def seed(r, owner):
+            settings = r.host.load_settings()
+            first = settings.accounts[0]
+            other = replace(first, id="other", username="other@example.invalid", password_secret="HERMES_MAIL_OTHER_APP_PASSWORD")
+            r.host.save_settings(replace(settings, accounts=(first, other)))
+            with closing(r.host.open_store()) as store:
+                store.initialize(other, 7, 100)
+            job = r.host.manage_cron("list", include_disabled=True)["jobs"][0]["job_id"]
+            r.host.manage_cron("pause", job_id=job)
+            return {"id": first.id, "job": job}
+        seeded = await self.inspect(seed)
+        await h.dispatch_native()
+        markup = h.native_sent[-1][1]["reply_markup"]
+        selector = next(button.text for row in markup.inline_keyboard for button in row if "me@example.invalid" in button.text)
+        await h.press(selector)
+        await h.press("Disable account")
+        requests_before = len(h.external_requests)
+        host = h.profile_resource().host
+        with patch.object(host, "check_environment", side_effect=HostError("credentials_not_reloadable")), \
+                patch.object(host, "complete_structured", side_effect=HostError("model_unavailable")), \
+                patch.object(host, "resolve_target", side_effect=HostError("destination_unavailable")):
+            await h.press("Start with these settings")
+        self.assertIn("not run", h.native_sent[-1][1]["text"])
+        self.assertEqual(len(h.external_requests), requests_before)
+        def verify(r, owner):
+            settings = r.host.load_settings()
+            self.assertEqual([(a.id, a.enabled) for a in settings.accounts], [(seeded["id"], False), ("other", True)])
+            jobs = r.host.manage_cron("list", include_disabled=True)["jobs"]
+            self.assertEqual([(j["job_id"], j["enabled"]) for j in jobs], [(seeded["job"], False)])
+            with closing(r.host.open_store()) as store:
+                self.assertEqual([store.cursor(a.id) for a in settings.accounts], [(7, 100), (7, 100)])
+            return {}
+        await self.inspect(verify)
         self.audit([password], [payload])

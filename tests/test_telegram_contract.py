@@ -57,6 +57,19 @@ class TelegramAdmissionContractTests(unittest.IsolatedAsyncioTestCase):
             await self.harness.close()
         self.assertFalse(root.exists(), "cleanup must finish even when the fence assertion fails")
 
+    async def test_secret_scanner_rejects_adapter_sends_and_callback_answer_envelopes(self):
+        h = self.harness
+        h.offline_mail_services()
+        for sink in (h.sent, h.callback_answers):
+            with self.subTest(sink="adapter" if sink is h.sent else "callback"):
+                marker = "test-only-scanner-outbound-secret"
+                sink.append({"text": marker})
+                try:
+                    with self.assertRaises(AssertionError):
+                        h.assert_secret_free(self, [marker])
+                finally:
+                    sink.clear()
+
     async def test_routed_profile_and_receiving_bot_survive_real_loader(self):
         from hermes_constants import get_hermes_home
         receipt = await self.harness.submit_native(user_id="111", route="beta", bot_id="700")
@@ -588,6 +601,41 @@ class TelegramAdmissionContractTests(unittest.IsolatedAsyncioTestCase):
         self.harness.reload_profile()
         await self.harness.dispatch_native(text="test-only-password-after-rewire", reply=prompt)
         self.assertFalse(self.harness.model_inputs, "stale credential reply must never start an agent turn")
+
+    async def test_rerouted_secret_guard_accepts_only_the_authenticated_profiles_current_prompt(self):
+        from contextlib import closing
+        from gateway.run import _profile_runtime_scope
+        from telegram import ForceReply
+        from telegram.ext import MessageHandler, filters
+        h = self.harness
+        await self.connected_preview(route="beta", thread_id=None, submit=False)
+        beta_prompt = next(message for message, kwargs in reversed(h.native_sent)
+                           if isinstance(kwargs.get("reply_markup"), ForceReply))
+        beta = h.profile_resource("beta")
+        with _profile_runtime_scope(h.beta_home), closing(beta.host.open_setup_store()) as store:
+            before = [tuple(row) for row in store.db.execute("SELECT revision, candidate_json FROM drafts")]
+        self.assertEqual(len(before), 1)
+        h.application.add_handler(MessageHandler(filters.TEXT, h.adapter._handle_text_message))
+        await h.dispatch_native()
+        await h.press("Gmail")
+        prompt = next(message for message, kwargs in reversed(h.native_sent)
+                      if isinstance(kwargs.get("reply_markup"), ForceReply))
+        marker = "test-only-rerouted-stale-secret"
+        await h.dispatch_native(text=marker, reply=beta_prompt)
+        await h.dispatch_native(text="default@example.com", reply=prompt)
+        default = h.profile_resource()
+        with _profile_runtime_scope(h.home), closing(default.host.open_setup_store()) as store:
+            draft = store.db.execute("SELECT state, candidate_json FROM drafts").fetchone()
+        self.assertEqual(draft[0], "awaiting_secret")
+        self.assertIn("default@example.com", draft[1])
+        with _profile_runtime_scope(h.beta_home), closing(beta.host.open_setup_store()) as store:
+            self.assertEqual([tuple(row) for row in store.db.execute("SELECT revision, candidate_json FROM drafts")], before)
+        self.assertEqual(h.model_inputs, [])
+        # Rerouting must not erase beta's client-lifetime guard, even after unload.
+        h.profiles["beta"].manager.unload()
+        await h.dispatch_native(text=marker + "-plain", route="beta")
+        self.assertNotIn(marker, repr((h.model_inputs, h.events, h.native_sent, h.sent, h.callback_answers)))
+        self.assertEqual(h.mail_passwords, {})
 
     async def test_same_client_reload_disposes_credentials_but_not_other_profile(self):
         payload = await self.connected_preview(route=None, thread_id=None)

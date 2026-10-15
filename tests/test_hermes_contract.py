@@ -203,10 +203,51 @@ class HermesContractTests(unittest.TestCase):
             jobs = self.host.manage_cron("list", include_disabled=True)["jobs"]
             self.assertEqual(len(jobs), 1)
             self.assertFalse(jobs[0]["enabled"])
+            self.assertTrue(store.get_meta("cron_paused"))
+            self.host.resume_schedule(job_id, store)
+            self.assertTrue(self.host.manage_cron("list", include_disabled=True)["jobs"][0]["enabled"])
             self.host.manage_cron("pause", job_id=job_id)
             self.host.manage_cron("remove", job_id=job_id)
         finally:
             store.close()
+
+    def test_onboarding_real_routed_profile_publication_and_secret_readback(self):
+        from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope, set_multiplex_context, reset_multiplex_context
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+        from mail_notifier.onboarding import OnboardingService
+        from mail_notifier.onboarding_auth import SetupOwner
+        from tests.test_service import FakeMailbox
+        routed = self.root / "routed-profile"
+        routed.mkdir()
+        home_token = set_hermes_home_override(str(routed))
+        scope_token = set_secret_scope(build_profile_secret_scope(routed), profile_home=str(routed))
+        multiplex_token = set_multiplex_context(True)
+        try:
+            service = OnboardingService(self.host, mailbox_factory=lambda a, p: FakeMailbox(a))
+            owner = SetupOwner(str(routed), "cli")
+            draft = service.start(owner, detected_language="en_US")
+            draft = service.change(draft.id, owner, draft.revision, action="add",
+                                   values={"provider": "gmail", "username": "local@example.invalid"})
+            draft = service.validate_password(draft.id, owner, draft.revision, "test-only-routed-secret")
+            self.assertFalse((routed / ".env").exists())
+            def model(payload, **kwargs):
+                return classification_data()
+            with patch("socket.create_connection", side_effect=AssertionError("unexpected network")), patch.object(self.host, "check_environment"), patch.object(self.host, "resolve_target", return_value="telegram:123"), patch.object(self.host, "complete_structured", side_effect=model), patch.object(self.host, "send", return_value={"success": True, "message_id": "42"}):
+                result = service.commit(draft.id, owner, draft.revision)
+            self.assertEqual(result["state"], "completed")
+            account = self.host.load_settings().accounts[0]
+            self.assertEqual(self.host.get_password(account), "test-only-routed-secret")
+            self.assertIn("test-only-routed-secret", (routed / ".env").read_text())
+            self.assertNotIn("test-only-routed-secret", (routed / "config.yaml").read_text())
+            self.assertNotIn(b"test-only-routed-secret", (routed / "plugin-data" / PLUGIN_ID / "setup.db").read_bytes())
+        finally:
+            reset_multiplex_context(multiplex_token)
+            reset_secret_scope(scope_token)
+            reset_hermes_home_override(home_token)
+        self.assertEqual(self.host.load_settings().accounts, ())
+        with self.assertRaises(HostError):
+            self.host.get_password(account)
+        self.assertFalse((self.home / ".env").exists())
 
     def test_migrated_destination_survives_real_home_channel_change(self):
         from hermes_cli.config import save_env_value

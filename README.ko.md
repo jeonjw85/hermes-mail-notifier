@@ -19,7 +19,7 @@ hermes plugins install jeonjw85/hermes-mail-notifier --enable
 최초 설정:
 
 ```sh
-hermes mail-notifier setup
+hermes mail-notifier setup --ui-language ko
 ```
 
 설치와 설정은 **Telegram을 사용 중인 동일한 Hermes 프로필**에서 실행하세요. 앱 비밀번호는 서버의 대화형 터미널에서 입력하며 화면에 표시되지 않습니다.
@@ -68,36 +68,38 @@ Gmail은 앱 비밀번호를 발급할 수 있는 계정만 지원합니다. 조
 
 `setup`에서 계정과 알림 기준을 함께 관리합니다.
 
-1. `add`를 입력하고 서비스, 별칭, 로그인 아이디, 메일함, 앱 비밀번호를 입력합니다.
-2. 연결 검사를 통과하면 필요한 계정을 추가합니다. 같은 서비스의 복수 계정도 가능합니다.
-3. `done`으로 계정 편집을 마칩니다.
-4. Telegram 목적지, 확인 주기, 요약 언어, 중요·제외 발신자, 키워드, 추가 판단 기준을 입력합니다.
-5. 설정·예약 작업을 저장하고 Telegram에 설정 완료 메시지를 보냅니다.
+1. 새 설치에서는 작업 메뉴 없이 서비스와 로그인 주소부터 입력합니다.
+2. 별칭은 주소, 메일함은 INBOX를 제안합니다. 선택적으로 고급 계정 항목을 수정한 뒤 **앱 비밀번호**를 비표시 터미널 입력으로 전달합니다.
+3. 연결 결과와 미리보기를 확인합니다. 목적지·주기·언어·판단 기준 등의 전체 고급 설정은 선택 사항입니다.
+4. `yes`로 발행을 명시적으로 확인합니다. 합성 메일 모델 검사, 새 IMAP 시작점 확인, 인증·설정 저장, 소유 예약 작업 갱신, Telegram 테스트 메시지 ID 확인을 수행합니다.
+5. 이후 관리에서는 `add`·`edit`·`disable`·`enable`과 `done`을 사용합니다. 같은 서비스의 복수 계정도 가능하며 변경 사항은 확인 후 발행합니다.
 
-기본값은 **5분마다**, **한국어**, **INBOX**, **현재 프로필의 Telegram home channel**입니다. 목적지는 `telegram`, `telegram:123456789`, `telegram:-1001234567890:456`처럼 지정할 수 있습니다. 마지막 숫자는 토픽 ID입니다.
+새 설치 기본값은 **5분마다**, **선택·감지한 UI 언어로 요약**, **INBOX**, **현재 프로필의 Telegram home channel**입니다. 기존 주기·목적지·요약 언어 (`fr` 등 포함)·판단 기준·운영 한도는 보존합니다. 목적지는 `telegram`, `telegram:123456789`, `telegram:-1001234567890:456`처럼 지정할 수 있습니다. 마지막 숫자는 토픽 ID입니다.
 
 - `edit`: 별칭·비밀번호·연결 정보 수정. 계정 ID 또는 표시 번호를 입력합니다.
 - `disable` / `enable`: 계정 확인 중지·재개. 대기 중인 알림은 보존합니다.
 - Enter: 현재 값 유지. 발신자·키워드 목록과 추가 판단 기준에서 `-`: 비우기.
 - 입력 중 Ctrl-C: 취소. 저장 이후 외부 단계에서 문제가 나면 완료된 단계와 오류 코드를 표시하므로 같은 `setup`을 재실행해 복구할 수 있습니다.
 - 잘못된 항목은 그 자리에서 다시 입력합니다. 연결 실패 시 `retry`·`password`·`back`·`cancel`을 선택하며, 앞서 입력한 다른 계정은 저장할 때까지 유지합니다.
+- 비밀정보 없는 초안은 별도 `setup.db`에 마지막 변경 후 최대 24시간 보존합니다. 검사된 비밀번호는 메모리에만 최대 10분 보관하므로 만료·재시작 후 재입력합니다. 불명확한 인증 쓰기를 비밀번호 교체 성공으로 간주하지 않습니다. cron·테스트 전송만 복구할 때는 이미 검증·저장한 비밀번호나 시작점을 다시 만들지 않습니다.
+- 다른 세션의 설정 변경은 덮어쓰지 않고 `needs_review`로 표시합니다. `already_running`은 입력을 보존하므로 재시도할 수 있습니다. 발행 시작 후에는 외부 저장을 취소·롤백했다고 주장하지 않고 완료 단계를 표시합니다. 테스트 전송 응답 유실 시 같은 시도 ID의 테스트 메시지가 중복될 수 있습니다.
 
 **처음 연결한 시점 이후 도착하는 메일부터** 확인합니다. 과거 메일은 한꺼번에 전송하지 않습니다. 읽은 새 메일도 처리하며, 별칭·비밀번호·판단 기준을 바꿔도 시작점을 초기화하지 않습니다. 서비스·로그인 아이디·메일함을 바꾸면 이전 연결을 중지하고 새 연결을 만듭니다.
 
-기존 cron의 일시정지 상태는 재설정해도 유지합니다. 모든 계정을 중지하면 cron도 일시정지되므로, 계정을 다시 켠 뒤에는 아래 `hermes cron resume JOB_ID`로 재개하세요.
+기존 cron의 일시정지 상태는 재설정해도 유지하며 자동 확인 완료 대신 `scheduled` / `resume_cron`으로 표시합니다. `setup`을 재실행해 명시적으로 재개를 승인하거나 `hermes cron resume JOB_ID`를 사용하세요. 모든 계정을 중지하면 cron도 일시정지됩니다.
 
 ### 언어
 
 기존 `language` 설정은 모델 요약과 알림의 고정 라벨·대체 사유·설정 완료·진단 테스트 알림 언어를 결정합니다. `setup`에서 `ko` 또는 `en`을 입력하거나 `hermes mail-notifier policy set --language en`을 사용하세요. 기존의 다른 요약 언어 값도 유지하며 모델에 그대로 전달합니다. 해당 언어의 고정 문구는 영어로 대체합니다. 이미 준비된 알림의 문구와 목적지는 바꾸지 않습니다.
 
-설정 스냅샷의 별도 `ui_language`는 `ko`, `en`, `""` (자동)을 허용합니다. 현재 진단의 다음 조치 안내에 적용되며 `language`를 변경하지 않습니다. 저장된 선택이나 감지한 UI 컨텍스트가 없으면 영어로 안내합니다. 공통 언어 해석기는 명시적 선택 → 저장된 UI 언어 → `ko-KR`·`en_US.UTF-8` 같은 감지한 지역 locale → 영어 순서로 선택합니다. 아직 이 기능만으로 터미널 마법사의 한영 전환이나 Telegram 설정 화면을 제공하지는 않습니다.
+별도 `ui_language`는 기존 요약 `language`를 변경하지 않고 한영 설정·상태·진단 안내를 선택합니다. `setup --ui-language ko|en` 또는 `accounts add/edit --ui-language ko|en`을 사용하세요. 우선순위는 명시적 선택 → 저장된 UI 언어 → CLI `LC_ALL`·`LC_MESSAGES`·`LANG` 중 첫 비어 있지 않은 값 → 영어입니다. `ko-KR`·`en_US.UTF-8` 같은 지역 locale을 정규화하며 미지원 언어는 영어로 안내합니다. CLI 도움말은 한영을 함께 표시합니다. Telegram 설정·Mini App UI는 아직 제공하지 않으므로 안전한 터미널 경로를 사용하세요.
 
 ## 운영과 판단 교정
 
 ```sh
 hermes mail-notifier accounts list --json
-hermes mail-notifier accounts add
-hermes mail-notifier accounts edit ACCOUNT_ID
+hermes mail-notifier accounts add --ui-language ko
+hermes mail-notifier accounts edit ACCOUNT_ID --ui-language ko
 hermes mail-notifier accounts disable ACCOUNT_ID
 hermes mail-notifier accounts enable ACCOUNT_ID
 hermes mail-notifier doctor --json

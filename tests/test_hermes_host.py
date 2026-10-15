@@ -42,6 +42,8 @@ class Context:
                 job.update(args)
             elif action == "pause":
                 job["enabled"] = False
+            elif action == "resume":
+                job["enabled"] = True
         return json.dumps({"success": True, "job": job, "job_id": job["job_id"]})
 
 
@@ -276,6 +278,19 @@ class HermesHostTests(unittest.TestCase):
         self.host.install_schedule(self.settings, self.store)
         self.ctx.jobs[0]["enabled"] = False
         self.host.install_schedule(self.settings, self.store)
+        self.assertFalse(self.ctx.jobs[0]["enabled"])
+        self.assertTrue(self.store.get_meta("cron_paused"))
+
+    def test_explicit_resume_verifies_owned_job_not_just_stored_id(self):
+        job_id = self.host.install_schedule(self.settings, self.store)
+        self.ctx.jobs[0]["enabled"] = False
+        self.host.resume_schedule(job_id, self.store)
+        self.assertTrue(self.ctx.jobs[0]["enabled"])
+        self.assertFalse(self.store.get_meta("cron_paused"))
+        self.ctx.jobs[0]["prompt_preview"] = "user-owned"
+        self.ctx.jobs[0]["enabled"] = False
+        with self.assertRaises(self.module.HostError):
+            self.host.resume_schedule(job_id, self.store)
         self.assertFalse(self.ctx.jobs[0]["enabled"])
 
     def test_foreign_job_is_not_modified_and_duplicate_owned_jobs_fail(self):

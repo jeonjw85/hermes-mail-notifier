@@ -104,6 +104,39 @@ class OperationsTests(unittest.TestCase):
         self.assertTrue(self.host.settings.accounts[0].enabled)
         self.assertEqual(self.store.cursor("a1"), (7, 101))
 
+    def test_enable_does_not_do_slow_imap_while_holding_mail_lock(self):
+        self.module.set_account_enabled(self.host, "a1", False)
+        def mailbox(account, password):
+            with self.store.run_lock() as acquired:
+                self.assertTrue(acquired)
+            return FakeMailbox(account)
+        self.module.set_account_enabled(self.host, "a1", True, mailbox_factory=mailbox)
+        self.assertTrue(self.host.load_settings().accounts[0].enabled)
+
+    def test_enable_command_never_publishes_an_unconfirmed_interactive_draft(self):
+        from mail_notifier.onboarding import OnboardingService
+        from mail_notifier.onboarding_auth import SetupOwner
+        service = OnboardingService(self.host)
+        owner = SetupOwner(str(self.host.home()), "cli")
+        draft = service.start(owner)
+        service.change(draft.id, owner, draft.revision, action="settings", values={"target": "telegram:999"})
+        with self.assertRaises(HostError):
+            self.module.set_account_enabled(self.host, "a1", False)
+        self.assertTrue(self.host.load_settings().accounts[0].enabled)
+        self.assertEqual(self.host.load_settings().target, "telegram")
+
+    def test_enable_command_rejects_settings_only_draft_even_when_form_is_empty(self):
+        from mail_notifier.onboarding import OnboardingService
+        from mail_notifier.onboarding_auth import SetupOwner
+        service = OnboardingService(self.host)
+        owner = SetupOwner(str(self.host.home()), "cli")
+        draft = service.start(owner)
+        draft = service.change(draft.id, owner, draft.revision, action="settings", values={"target": "telegram:999"})
+        service.change(draft.id, owner, draft.revision, action="form", values={})
+        with self.assertRaises(HostError):
+            self.module.set_account_enabled(self.host, "a1", False)
+        self.assertEqual(self.host.load_settings().target, "telegram")
+
     def test_explicit_history_and_feedback_roundtrip(self):
         record = self.module.history(self.host, mail_id=self.identifier)["items"][0]
         self.assertEqual(record["decision"]["mail"]["subject"], "private subject")

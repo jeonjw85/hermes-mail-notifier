@@ -315,7 +315,7 @@ class HermesHost:
             if name and os.path.exists(name):
                 os.unlink(name)
 
-    def install_schedule(self, settings: Settings, store: Store) -> str:
+    def _owned_schedule(self):
         script = self.home() / "scripts" / "hermes-mail-notifier.py"
         jobs = self.manage_cron("list", include_disabled=True).get("jobs")
         if not isinstance(jobs, list):
@@ -325,13 +325,30 @@ class HermesHost:
                  and job.get("script") and (script.parent / job["script"]).resolve() == script.resolve()]
         if len(owned) > 1:
             raise HostError("duplicate_owned_cron_jobs")
-        existing = owned[0] if owned else None
+        return owned[0] if owned else None
+
+    def resume_schedule(self, job_id: str, store: Store) -> None:
+        existing = self._owned_schedule()
+        if existing is None or existing.get("job_id") != job_id:
+            raise HostError("cron_ownership_failed")
+        self.manage_cron("resume", job_id=job_id)
+        current = self._owned_schedule()
+        if current is None or current.get("job_id") != job_id or current.get("enabled") is False or current.get("state") == "paused":
+            raise HostError("cron_operation_failed")
+        store.set_meta("cron_job_id", job_id)
+        store.set_meta("cron_paused", False)
+
+    def install_schedule(self, settings: Settings, store: Store) -> str:
+        script = self.home() / "scripts" / "hermes-mail-notifier.py"
+        existing = self._owned_schedule()
         if not any(account.enabled for account in settings.accounts):
             if existing:
                 self.manage_cron("pause", job_id=existing["job_id"])
                 store.set_meta("cron_job_id", existing["job_id"])
+                store.set_meta("cron_paused", True)
                 return existing["job_id"]
             store.set_meta("cron_job_id", None)
+            store.set_meta("cron_paused", False)
             return ""
         self._write_shim(script)
         fields = dict(name=PLUGIN_ID, prompt=_MARKER, schedule=settings.schedule,
@@ -344,6 +361,7 @@ class HermesHost:
         if not isinstance(job_id, str) or not job_id:
             raise HostError("invalid_cron_response")
         store.set_meta("cron_job_id", job_id)
+        store.set_meta("cron_paused", bool(existing and (existing.get("enabled") is False or existing.get("state") == "paused")))
         return job_id
 
     def check_compatibility(self) -> None:

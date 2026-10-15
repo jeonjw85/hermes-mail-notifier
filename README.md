@@ -19,7 +19,7 @@ hermes plugins install jeonjw85/hermes-mail-notifier --enable
 Run the initial setup:
 
 ```sh
-hermes mail-notifier setup
+hermes mail-notifier setup --ui-language en
 ```
 
 Run installation and setup in **the same Hermes profile that already uses Telegram**. Enter app passwords in an interactive terminal on the server; password input is hidden.
@@ -68,36 +68,38 @@ Gmail support requires an account that can create app passwords. Accounts blocke
 
 Use `setup` to manage accounts and notification rules together.
 
-1. Enter `add`, then provide the service, account label, login ID, mailbox, and app password.
-2. Once the connection check passes, add any other accounts. Multiple accounts from the same service are supported.
-3. Enter `done` to finish editing accounts.
-4. Set the Telegram destination, polling interval, summary language, important and excluded senders, keywords, and additional importance criteria.
-5. Save the settings and scheduled job. A setup confirmation message is sent to Telegram.
+1. On a new installation, select the service and enter the login address directly; no action menu is required.
+2. The address is the suggested label and the mailbox is INBOX. Optionally edit these advanced account fields, then enter an **app password** using hidden terminal input.
+3. Review the connection result and settings preview. Global advanced settings (destination, schedule, languages and importance rules) are optional.
+4. Enter `yes` to explicitly confirm publication. Setup checks a synthetic email with the model, takes a fresh mailbox starting point, saves credentials/settings, updates its owned scheduled job and verifies a Telegram test-message ID.
+5. For later management, use `add`, `edit`, `disable`, `enable`, then `done`. Multiple accounts from the same service are supported. These changes also require confirmation before publication.
 
-Defaults are **every 5 minutes**, **Korean summaries**, **INBOX**, and **the current profile's Telegram home channel**. Destination examples include `telegram`, `telegram:123456789`, and `telegram:-1001234567890:456`. In the last example, the final number is the topic ID.
+New-installation defaults are **every 5 minutes**, **summaries in the selected/detected UI language**, **INBOX**, and **the current profile's Telegram home channel**. Existing schedules, destinations, summary languages (including values such as `fr`), rules and operational limits are preserved. Destination examples include `telegram`, `telegram:123456789`, and `telegram:-1001234567890:456`. In the last example, the final number is the topic ID.
 
 - `edit`: Change an account's label, password, or connection details. Enter its account ID or displayed number.
 - `disable` / `enable`: Stop or resume checks for an account. Pending notifications are preserved.
 - Enter: Keep the current value. Use `-` to clear sender lists, keyword lists, or additional criteria.
 - Ctrl-C during input: Cancel. If an external step fails after settings have been saved, setup reports the completed steps and an error code. Run `setup` again to recover.
 - Invalid fields can be corrected in place. Connection failures offer `retry`, `password`, `back`, or `cancel`; other account drafts are preserved until you save.
+- Non-secret drafts are kept in separate `setup.db` storage for at most 24 hours without changes. Validated passwords stay only in memory for up to 10 minutes. After expiry/restart, enter them again; an ambiguous credential write is never treated as a successful password replacement. Cron/test-message repair does not require re-entering an already verified, saved password or resetting the mailbox baseline.
+- A settings conflict reports `needs_review` instead of overwriting another session's changes. `already_running` preserves inputs for retry. After publication begins, setup reports completed steps rather than claiming cancellation rolled back external writes. A lost test-send response may cause a duplicate test message; it carries the same attempt ID.
 
 Only **mail arriving after an account is first connected** is checked; existing mail is not sent in bulk. New mail is processed even if it has already been read. Changing a label, password, or importance criteria does not reset the starting point. Changing the service, login ID, or mailbox disables the old connection and creates a new one.
 
-Re-running setup preserves an existing cron job's paused state. Disabling all accounts also pauses the cron job. After enabling an account again, resume the job with `hermes cron resume JOB_ID`, as shown below.
+Re-running setup preserves an existing cron job's paused state and reports `scheduled` / `resume_cron`, not automatic-check completion. Re-run `setup` to explicitly approve resuming it, or use `hermes cron resume JOB_ID`. Disabling all accounts also pauses the cron job.
 
 ### Languages
 
 The existing `language` setting controls model summaries and the fixed labels, fallback reasons, setup confirmation and diagnostic test notifications. Choose `ko` or `en` in `setup`, or use `hermes mail-notifier policy set --language en`. Other existing summary-language values remain supported: the model receives the value unchanged, while fixed messages fall back to English. Already prepared notifications keep their saved text and destination.
 
-The separate `ui_language` setting in the configuration snapshot accepts `ko`, `en`, or `""` (automatic). It currently selects diagnostic guidance without changing `language`; without a saved selection or detected UI context, guidance falls back to English. The shared locale resolver supports explicit selection, then saved UI language, then a detected regional locale such as `ko-KR` or `en_US.UTF-8`, then English. This does not yet provide a bilingual terminal wizard or Telegram setup interface.
+The separate `ui_language` setting selects Korean/English setup, status and diagnostic guidance without changing an existing summary `language`. Use `setup --ui-language ko|en` or `accounts add/edit --ui-language ko|en`. Resolution is explicit selection → saved UI language → CLI `LC_ALL`, `LC_MESSAGES`, `LANG` (first nonempty value) → English. Regional locales such as `ko-KR` and `en_US.UTF-8` are normalized; unsupported locales use English. CLI help shows both languages. Telegram setup/Mini App UI is not available yet; use the secure terminal flow.
 
 ## Operations and Corrections
 
 ```sh
 hermes mail-notifier accounts list --json
-hermes mail-notifier accounts add
-hermes mail-notifier accounts edit ACCOUNT_ID
+hermes mail-notifier accounts add --ui-language en
+hermes mail-notifier accounts edit ACCOUNT_ID --ui-language en
 hermes mail-notifier accounts disable ACCOUNT_ID
 hermes mail-notifier accounts enable ACCOUNT_ID
 hermes mail-notifier doctor --json

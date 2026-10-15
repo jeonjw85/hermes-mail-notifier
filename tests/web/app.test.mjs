@@ -65,6 +65,45 @@ test('ordinary browser cannot submit through a script-only bridge; missing bridg
   }
 });
 
+test('identifiable non-keyboard launches block input, crypto and bridge submission', async t => {
+  for (const initData of ['query_id=inline-launch', 'chat_type=private&chat_instance=direct-link',
+    'chat_type=sender', 'chat_instance=direct-link', 'chat_type=', 'chat_instance=',
+    'receiver=%7B%22id%22%3A20%7D', 'chat=%7B%22id%22%3A20%7D', 'start_param=attachment-link',
+    'can_send_after=0', 'chat_join_request_query_id=join-request']) {
+    await t.test(initData, async () => {
+      const calls = [];
+      const subtle = new Proxy(webcrypto.subtle, { get(target, key) {
+        return (...args) => { calls.push(key); return target[key](...args); };
+      } });
+      const cryptoApi = { subtle, getRandomValues(...args) { calls.push('getRandomValues'); return webcrypto.getRandomValues(...args); } };
+      const f = fixture({ initData, cryptoApi });
+      // Dispatch even when disabled: the handler must also stay closed.
+      f.password.value = 'synthetic';
+      assert.equal(await f.form.dispatch('submit'), true);
+      assert.equal(f.sent.length, 0);
+      assert.deepEqual(calls, []);
+      assert.equal(f.password.value, '');
+      assert.equal(f.password.disabled, true);
+      assert.equal(f.submit.disabled, true);
+      assert.equal(f.status.textContent, messages.en['credential.unavailable']);
+      f.mount.dispose();
+    });
+  }
+});
+
+test('empty keyboard initData remains usable for real encryption and one bridge submission', async () => {
+  const f = fixture({ initData: '' });
+  assert.equal(f.password.disabled, false);
+  assert.equal(f.submit.disabled, false);
+  f.password.value = 'synthetic';
+  await f.form.dispatch('submit');
+  assert.equal(f.password.value, '');
+  assert.equal(f.sent.length, 1);
+  assert.equal(JSON.parse(f.sent[0]).kind, 'mail_notifier_credential');
+  assert.equal(f.status.textContent, messages.en['credential.submitted']);
+  f.mount.dispose();
+});
+
 test('unsupported explicit locale falls back to English; selection updates labels without bridge identity', async () => {
   const f = fixture({ language: 'fr' });
   assert.equal(f.document.documentElement.lang, 'en');

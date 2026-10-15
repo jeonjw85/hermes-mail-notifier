@@ -27,8 +27,10 @@ export function mountCredentialForm({ document, webApp, cryptoApi, location, now
   // This is a usability/context gate, NOT sender authentication. The bot must
   // authenticate the received event. KeyboardButton initData may be empty.
   const supportedPlatforms = ['android', 'android_x', 'ios', 'macos', 'tdesktop', 'web', 'weba', 'webk', 'unigram'];
+  const initData = new URLSearchParams(webApp?.initData || '');
+  const nonKeyboardFields = ['query_id', 'chat_type', 'chat_instance', 'receiver', 'chat', 'start_param', 'can_send_after', 'chat_join_request_query_id'];
   const bridgeAvailable = webApp && supportedPlatforms.includes(webApp.platform) && typeof webApp.sendData === 'function' &&
-    !new URLSearchParams(webApp.initData || '').has('query_id');
+    !nonKeyboardFields.some(field => initData.has(field));
   const cryptoAvailable = cryptoApi && typeof cryptoApi.getRandomValues === 'function' &&
     ['generateKey', 'importKey', 'deriveBits', 'deriveKey', 'encrypt', 'exportKey'].every(method => typeof cryptoApi.subtle?.[method] === 'function');
   if (state === 'ready' && (!bridgeAvailable || !cryptoAvailable)) state = 'unavailable';

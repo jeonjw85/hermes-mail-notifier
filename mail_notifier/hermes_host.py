@@ -11,10 +11,14 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import PLUGIN_ID, Account, Settings, dump_settings, load_settings
 from .store import StorageError, Store
 from .triage import ModelReply, TriageError
+
+if TYPE_CHECKING:
+    from .onboarding_store import SetupStore
 
 _MARKER = "Managed by hermes-mail-notifier."
 _CHILD_ENV = frozenset({
@@ -70,6 +74,11 @@ class HermesHost:
         except Exception:
             raise HostError("settings_save_failed") from None
 
+    def has_saved_settings(self) -> bool:
+        missing = object()
+        return any(self.ctx.get_config(key, missing) is not missing
+                   for key in ("configuration", *dump_settings(Settings())))
+
     def get_password(self, account: Account) -> str:
         try:
             from agent.secret_scope import get_secret
@@ -108,6 +117,16 @@ class HermesHost:
             raise
         except Exception:
             raise HostError("storage_unavailable") from None
+
+    def open_setup_store(self) -> "SetupStore":
+        try:
+            from plugins.plugin_storage import plugin_data_dir
+            from .onboarding_store import SetupStore
+            return SetupStore(plugin_data_dir(PLUGIN_ID) / "setup.db")
+        except HostError:
+            raise
+        except Exception:
+            raise HostError("setup_storage_unavailable") from None
 
     def complete_structured(self, payload: dict, *, timeout=45) -> ModelReply:
         try:

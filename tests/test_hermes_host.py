@@ -83,6 +83,29 @@ class HermesHostTests(unittest.TestCase):
         self.assertEqual(self.host.load_settings(), self.settings)
         self.assertEqual(self.ctx.settings, {"configuration": dump_settings(self.settings)})
 
+    def test_saved_settings_distinguish_defaults_empty_snapshots_and_legacy_values(self):
+        self.assertFalse(self.host.has_saved_settings())
+        for saved in ({"configuration": {}}, {"configuration": dump_settings(Settings())},
+                      {"accounts": []}, {"language": "fr"}, {"ui_language": ""}, {"important_senders": []}):
+            with self.subTest(saved=saved):
+                self.ctx.settings = saved
+                self.assertTrue(self.host.has_saved_settings())
+        self.ctx.settings = {"unrelated": True}
+        self.assertFalse(self.host.has_saved_settings())
+
+    def test_setup_store_uses_plugin_data_dir_without_opening_mail_database(self):
+        from mail_notifier.onboarding_auth import SetupOwner
+        data = self.profile / "plugin data"
+        storage = types.SimpleNamespace(plugin_data_dir=lambda name: data if name == "hermes-mail-notifier" else None)
+        with patch.dict(sys.modules, {"plugins.plugin_storage": storage}):
+            store = self.host.open_setup_store()
+        self.addCleanup(store.close)
+        owner = SetupOwner(str(self.profile), "cli")
+        draft = store.create(owner, Settings(), original_saved=False, now=1000)
+        self.assertEqual(store.get(draft.id, owner), draft)
+        self.assertTrue((data / "setup.db").is_file())
+        self.assertFalse((data / "data.db").exists())
+
     def test_interrupted_save_never_combines_new_accounts_with_old_target(self):
         original = Settings(target="telegram:111")
         self.ctx.settings = dump_settings(original)  # Existing flat settings remain readable.

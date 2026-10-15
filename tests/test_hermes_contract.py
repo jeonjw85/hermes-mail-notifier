@@ -11,7 +11,7 @@ import tempfile
 import types
 import unittest
 import venv
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -119,6 +119,56 @@ class HermesContractTests(unittest.TestCase):
             self.host.check_environment(settings)
         save_env_value("OPENAI_API_KEY", "test-only-environment-key")
         self.host.check_environment(settings)
+
+    def test_setup_database_is_separate_profile_scoped_and_preserves_mail_queue(self):
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+        from mail_notifier.onboarding_auth import SetupOwner
+        owner = SetupOwner(str(self.home), "telegram", "10", "20", "20")
+        mail = self.host.open_store()
+        self.addCleanup(mail.close)
+        mail.initialize(self.account, 7, 100)
+        mail.enqueue(self.account, 7, [101], now=1000)
+        before = list(mail.db.iterdump())
+        store = self.host.open_setup_store()
+        self.addCleanup(store.close)
+        draft = store.create(owner, Settings(), original_saved=False, now=1000)
+        self.assertEqual(mail.db.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(list(mail.db.iterdump()), before)
+        self.assertEqual(mail.due(self.account.id, 1000, 10)[0].key, ("a1", "INBOX", 7, 101))
+        data = self.home / "plugin-data" / PLUGIN_ID
+        self.assertEqual((data / "setup.db").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(data.stat().st_mode & 0o777, 0o700)
+        with closing(sqlite3.connect(data / "setup.db")) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+        other = self.root / "profile-b"
+        home_token = set_hermes_home_override(str(other))
+        try:
+            other_store = self.host.open_setup_store()
+            self.addCleanup(other_store.close)
+            with self.assertRaisesRegex(HostError, "setup_not_found"):
+                other_store.get(draft.id, owner)
+            self.assertFalse((other / "plugin-data" / PLUGIN_ID / "data.db").exists())
+        finally:
+            reset_hermes_home_override(home_token)
+        self.assertEqual(store.get(draft.id, owner), draft)
+
+    def test_saved_empty_snapshot_and_legacy_values_are_not_unsaved_defaults(self):
+        self.assertFalse(self.host.has_saved_settings())
+        self.ctx.set_config("configuration", {})
+        self.assertTrue(self.host.has_saved_settings())
+        self.assertEqual(self.host.load_settings(), Settings())
+        self.host.save_settings(Settings(language="fr", ui_language="en"))
+        self.assertTrue(self.host.has_saved_settings())
+        self.assertEqual(self.host.load_settings().language, "fr")
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+        home_token = set_hermes_home_override(str(self.root / "legacy-profile"))
+        try:
+            self.assertFalse(self.host.has_saved_settings())
+            self.ctx.set_config("accounts", [])
+            self.assertTrue(self.host.has_saved_settings())
+            self.assertEqual(self.host.load_settings().accounts, ())
+        finally:
+            reset_hermes_home_override(home_token)
 
     def test_credential_probe_with_host_dependencies_outside_interpreter(self):
         import hermes_cli

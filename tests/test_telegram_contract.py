@@ -14,13 +14,18 @@ from unittest.mock import patch
 
 @unittest.skipUnless(os.environ.get("HERMES_CONTRACT") == "1", "set HERMES_CONTRACT=1 with pinned Hermes")
 class TelegramAdmissionContractTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    def setUp(self):
         from tests.telegram_support import GatewayHarness
         self.harness = GatewayHarness()
         self.addAsyncCleanup(self.harness.close)
 
     async def test_denied_sender_never_receives_an_admission_receipt(self):
-        result = await self.harness.submit_native(user_id="222", allowed_users="111")
+        with self.assertLogs("gateway.run", "WARNING") as logs:
+            result = await self.harness.submit_native(user_id="222", allowed_users="111")
+            await self.harness.drain()
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("Unauthorized user (ignored):", logs.output[0])
+        self.assertIn("unrecognized telegram user 222", logs.output[0])
         self.assertIsNone(result)
         self.assertEqual(self.harness.effects, [])
 
@@ -169,7 +174,10 @@ class TelegramAdmissionContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_ordinary_messages_need_sdk_observation_and_denied_senders_get_no_origin(self):
         self.assertIsNone(await self.harness.submit_ordinary(observe=False))
         self.assertEqual(len(self.harness.tool_results), 1)
-        self.assertIsNone(await self.harness.submit_ordinary(user_id="222"))
+        with self.assertLogs("plugins.platforms.telegram.adapter", "WARNING") as logs:
+            self.assertIsNone(await self.harness.submit_ordinary(user_id="222"))
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("Blocked unauthorized user 222 in chat 222", logs.output[0])
 
     async def test_shared_slot_abi_mismatch_fails_closed(self):
         with patch.dict(sys.modules, {"_hermes_mail_notifier_onboarding_v1": SimpleNamespace(ABI=2)}):

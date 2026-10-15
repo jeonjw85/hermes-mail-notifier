@@ -5,7 +5,11 @@ import contextvars
 import importlib
 import json
 import os
+import socket
+import sys
 import tempfile
+import threading
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,18 +20,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class GatewayHarness:
     def __init__(self):
-        self.temp = tempfile.TemporaryDirectory(prefix=".mail-telegram-contract-", dir=ROOT)
-        self.root = Path(self.temp.name).resolve()
-        self.home = self.root / ".hermes"
-        self.beta_home = self.home / "profiles" / "beta"
-        self.beta_home.mkdir(parents=True)
-        self.env = patch.dict(os.environ, {"HOME": str(self.root), "HERMES_HOME": str(self.home),
-                                          "PATH": str(Path(os.sys.executable).parent) + os.pathsep + os.defpath,
-                                          "LANG": "en_US.UTF-8"}, clear=True)
-        self.env.start()
+        self._cleanup = ExitStack()
+        self._closed = False
+        self.network_attempts = []
+        self._network_lock = threading.Lock()
+        # Last callback: fail even when host exception handling swallowed a guard.
+        self._cleanup.callback(self._assert_no_egress)
         self.managers = []
-        self.patches = []
         try:
+            self._guard_network()
+            self.temp = tempfile.TemporaryDirectory(prefix=".mail-telegram-contract-", dir=ROOT.parent)
+            self._cleanup.callback(self.temp.cleanup)
+            self.root = Path(self.temp.name).resolve()
+            self.home = self.root / ".hermes"
+            self.beta_home = self.home / "profiles" / "beta"
+            self.beta_home.mkdir(parents=True)
+            self._cleanup.enter_context(patch.dict(os.environ, {
+                "HOME": str(self.root), "HERMES_HOME": str(self.home),
+                "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,
+                "LANG": "en_US.UTF-8"}, clear=True))
+            # Registered before host imports: also runs on partial construction.
+            self._cleanup.callback(self._close_host_state)
             from gateway.config import GatewayConfig, Platform, PlatformConfig
             from gateway.run import GatewayRunner
             from plugins.platforms.telegram.adapter import TelegramAdapter
@@ -44,6 +57,12 @@ class GatewayHarness:
             self.tool_done = asyncio.Event()
             from gateway.run import _profile_runtime_scope
             from hermes_cli.plugins import PluginContext, PluginManifest, get_plugin_manager
+            import hermes_cli.plugins as plugins
+            previous_manager = plugins._plugin_manager
+            def restore_manager():
+                if plugins._plugin_manager in self.managers:
+                    plugins._plugin_manager = previous_manager
+            self._cleanup.callback(restore_manager)
             for name, home in (("default", self.home), ("beta", self.beta_home)):
                 with _profile_runtime_scope(home):
                     (home / "config.yaml").write_text(
@@ -56,6 +75,7 @@ class GatewayHarness:
                     (home / ".env").write_text("TELEGRAM_ALLOWED_USERS=111\nOPENAI_API_KEY=test-only-key\n", encoding="utf-8")
                     manager = get_plugin_manager()
                     self.managers.append(manager)
+                    self._cleanup.callback(self._release_manager, manager)
                     manager._discovered = True
                     manifest = PluginManifest(name="hermes-mail-notifier", key="hermes-mail-notifier",
                                               version="0.2.0", source="project", path=str(ROOT))
@@ -72,10 +92,15 @@ class GatewayHarness:
                                               "parameters": {"type": "object", "properties": {}}})
                     manager._hooks.setdefault("pre_gateway_dispatch", []).append(self.record_event)
                     self.profiles[name] = SimpleNamespace(manager=manager, module=module, broker=broker)
+                    # Parse the real host locale catalog outside the event loop;
+                    # the first denied-message/agent turn would otherwise block it.
+                    from agent.i18n import t
+                    t("gateway.unauthorized.owner_hint_generic")
             self.broker = self.profiles["default"].broker
             self.config = GatewayConfig(multiplex_profiles=True, sessions_dir=self.home / "sessions",
                                         platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="700:test-only")})
             self.runner = GatewayRunner(self.config)
+            self._cleanup.callback(self._close_runner)
             self.adapter = TelegramAdapter(self.config.platforms[Platform.TELEGRAM])
             self.adapter.gateway_runner = self.runner
             self.runner.adapters[Platform.TELEGRAM] = self.adapter
@@ -83,25 +108,89 @@ class GatewayHarness:
             self.patch(self.adapter, "send", self.send)
             self.patch(self.adapter, "send_typing", self.noop)
             from run_agent import AIAgent
+            from agent import model_metadata, usage_pricing
+            # There is no live model server behind our loopback RPC fake. Its
+            # discovery/pricing queries are model-network boundaries too.
+            self.patch(model_metadata, "detect_local_server_type", lambda *args, **kwargs: None)
+            self.patch(usage_pricing, "fetch_endpoint_model_metadata", lambda *args, **kwargs: {})
             def model_call(agent, api_kwargs, *args, **kwargs):
                 return self.model_response(api_kwargs)
             self.patch(AIAgent, "_interruptible_api_call", model_call)
             self.patch(AIAgent, "_interruptible_streaming_api_call", model_call)
-            # No unexpected network operation may escape this offline fixture.
-            network = patch("socket.socket.connect", side_effect=AssertionError("unexpected network"))
-            network.start()
-            self.patches.append(network)
-            import httpx
-            self.patch(httpx.Client, "send", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected HTTP")))
         except BaseException:
-            self.env.stop()
-            self.temp.cleanup()
+            self._dispose()
             raise
 
     def patch(self, obj, name, value):
-        handle = patch.object(obj, name, value)
-        handle.start()
-        self.patches.append(handle)
+        self._cleanup.enter_context(patch.object(obj, name, value))
+
+    def _deny_egress(self, operation):
+        # Do not retain URLs, payloads, or credentials in failure diagnostics.
+        with self._network_lock:
+            self.network_attempts.append(operation)
+        raise AssertionError("unexpected offline egress: " + operation)
+
+    def _guard_network(self):
+        guards = self._cleanup.enter_context(ExitStack())
+        for obj, prefix, names in (
+            (socket, "socket.", ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr",
+                                 "getnameinfo", "create_connection")),
+            (socket.socket, "socket.socket.", ("connect", "connect_ex", "sendto")),
+        ):
+            for name in names:
+                def deny(*args, operation=prefix + name, **kwargs):
+                    self._deny_egress(operation)
+                guards.enter_context(patch.object(obj, name, deny))
+        # Even importing the HTTP client is inside the resolver/connection fence.
+        import httpx
+        def deny_http(*args, **kwargs):
+            self._deny_egress("httpx.Client.send")
+        async def deny_async_http(*args, **kwargs):
+            self._deny_egress("httpx.AsyncClient.send")
+        guards.enter_context(patch.object(httpx.Client, "send", deny_http))
+        guards.enter_context(patch.object(httpx.AsyncClient, "send", deny_async_http))
+
+    def _assert_no_egress(self):
+        with self._network_lock:
+            attempts = list(self.network_attempts)
+        if attempts:
+            raise AssertionError("unexpected offline egress: " + ", ".join(attempts))
+
+    def _release_manager(self, manager):
+        import hermes_cli.plugins as plugins
+        try:
+            plugins._clear_plugin_submodules(manager)
+            manager.unload()
+        finally:
+            with plugins._plugin_managers_lock:
+                for home, cached in list(plugins._plugin_managers_by_home.items()):
+                    if cached is manager:
+                        del plugins._plugin_managers_by_home[home]
+
+    def _close_runner(self):
+        # ExitStack runs the remaining cleanup even if one resource fails close.
+        with ExitStack() as cleanup:
+            cleanup.callback(self.runner.close_all_session_db_handles)
+            cleanup.callback(self.runner.session_store.close_all_db_handles)
+            for cached in self.runner._agent_cache.values():
+                cleanup.callback(cached[0].close)
+            cleanup.callback(self.runner._shutdown_executor, drain_timeout=2)
+
+    def _close_host_state(self):
+        # Do not import new host modules after an import/setup failure.
+        with ExitStack() as cleanup:
+            if module := sys.modules.get("agent.secret_scope"):
+                cleanup.callback(module.set_multiplex_active, False)
+            if module := sys.modules.get("hermes_logging"):
+                cleanup.callback(module._reset_queued_handlers)
+                cleanup.callback(module.flush_log_queue)
+            if module := sys.modules.get("hermes_state_registry"):
+                cleanup.callback(module.close_all_under, self.root)
+
+    def _dispose(self):
+        if not self._closed:
+            self._closed = True
+            self._cleanup.close()
 
     def record_event(self, **kwargs):
         self.events.append(kwargs)
@@ -203,26 +292,12 @@ class GatewayHarness:
             await asyncio.sleep(0)
 
     async def close(self):
-        from agent.secret_scope import set_multiplex_active
-        tasks = list(getattr(self.adapter, "_background_tasks", ()))
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self.runner._shutdown_executor(drain_timeout=2)
-        for cached in self.runner._agent_cache.values():
-            cached[0].close()
-        for manager in reversed(self.managers):
-            manager.unload()
-        for handle in reversed(self.patches):
-            handle.stop()
-        for db in self.runner._session_db_handles.values():
-            await db.close()
-        self.runner.session_store.close_all_db_handles()
-        from hermes_state_registry import close_all_under
-        close_all_under(self.root)
-        from hermes_logging import flush_log_queue, _reset_queued_handlers
-        flush_log_queue()
-        _reset_queued_handlers()
-        set_multiplex_active(False)
-        self.env.stop()
-        self.temp.cleanup()
+        if self._closed:
+            return
+        try:
+            tasks = list(getattr(getattr(self, "adapter", None), "_background_tasks", ()))
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self._dispose()

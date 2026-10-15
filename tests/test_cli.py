@@ -191,6 +191,28 @@ class CliTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_accounts_cli_can_disable_again_after_enable_while_cron_is_paused(self):
+        account = self.first_setup()
+        parser = argparse.ArgumentParser()
+        self.module.configure_parser(parser)
+        with patch.object(self.module, "ImapMailbox", self.mailbox):
+            for action in ("disable", "enable", "disable"):
+                with redirect_stdout(io.StringIO()) as out:
+                    code = self.module.run_cli(parser.parse_args(["accounts", action, account.id, "--json"]), self.host)
+                self.assertEqual(code, 0, out.getvalue())
+                self.assertEqual(json.loads(out.getvalue())["enabled"], action == "enable")
+        self.assertFalse(self.host.load_settings().accounts[0].enabled)
+        self.assertTrue(self.host.paused)
+
+    def test_edit_disabled_account_replaces_password_without_enabling_notifications(self):
+        account = self.first_setup()
+        self.assertEqual(self.setup_with(["disable", account.id, "done", "no", "yes"]), 0)
+        self.assertEqual(self.setup_with(["edit", account.id, "", "", "", "", "done", "no", "yes"],
+                                        password="disabled-rotation"), 0)
+        self.assertEqual(self.host.passwords[account.id], "disabled-rotation")
+        self.assertFalse(self.host.load_settings().accounts[0].enabled)
+        self.assertTrue(self.host.paused)
+
     def test_cron_failure_reports_partial_setup_and_reexecution_recovers(self):
         self.host.cron_failure = True
         self.assertNotEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "yes"]), 0)

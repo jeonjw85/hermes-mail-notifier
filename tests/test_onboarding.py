@@ -1,10 +1,11 @@
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from mail_notifier.config import Settings
+from mail_notifier.config import Settings, settings_fingerprint
 from mail_notifier.hermes_host import HostError
 from mail_notifier.onboarding_auth import SetupOwner
 from tests.support import feature
@@ -401,3 +402,257 @@ class OnboardingTests(unittest.TestCase):
             self.service.repair(expired.id, self.owner, expired.revision, step="cron")
         self.assertEqual(self.host.events, events)
         self.assertEqual(self.host.schedule_calls, calls)
+
+    def test_paused_publication_can_be_acknowledged_without_resuming_or_completing(self):
+        self.host.paused = True
+        draft = self.validated()
+        self.assertEqual(self.commit(draft)["state"], "scheduled")
+        draft = self.stored(draft)
+        events = list(self.host.events)
+        acknowledged = self.service.acknowledge(draft.id, self.owner, draft.revision,
+                                               current_fingerprint=settings_fingerprint(self.host.load_settings()))
+        self.assertEqual(acknowledged.state, "acknowledged")
+        self.assertEqual(acknowledged.original, draft.original)
+        self.assertEqual(acknowledged.candidate, draft.candidate)
+        self.assertEqual({k: v for k, v in acknowledged.steps.items() if k != "acknowledgement"}, draft.steps)
+        self.assertEqual(acknowledged.steps["acknowledgement"]["reason"], "paused")
+        self.assertTrue(self.host.paused)
+        self.assertEqual(self.host.events, events)
+        fresh = self.service.start(self.owner)
+        self.assertNotEqual(fresh.id, draft.id)
+        self.assertEqual(fresh.original, self.host.load_settings())
+        for method in (lambda: self.commit(acknowledged),
+                       lambda: self.service.repair(acknowledged.id, self.owner, acknowledged.revision, step="cron")):
+            with self.assertRaises(HostError):
+                method()
+        self.assertEqual(self.host.events, events)
+
+    def test_post_write_conflict_acknowledgement_retains_evidence_and_restarts_from_current(self):
+        for failure in ("credentials", "settings", "cron"):
+            with self.subTest(failure=failure):
+                temp = tempfile.TemporaryDirectory()
+                self.addCleanup(temp.cleanup)
+                self.host = SetupHost(temp.name)
+                self.owner = SetupOwner(str(self.host.home()), "cli")
+                self.service = self.new_service()
+                draft = self.validated()
+                if failure == "credentials":
+                    with patch.object(self.host, "save_password", side_effect=SystemExit), self.assertRaises(SystemExit):
+                        self.commit(draft)
+                elif failure == "settings":
+                    with patch.object(self.host, "save_settings", side_effect=HostError("settings_save_failed")):
+                        self.commit(draft)
+                else:
+                    self.host.cron_failure = True
+                    self.commit(draft)
+                    self.host.cron_failure = False
+                self.host.settings = replace(self.host.load_settings(), language="fr", target="telegram:444", ui_language="en")
+                current = self.host.load_settings()
+                draft = self.stored(draft)
+                # The lock-time settings check must win even for ambiguous writes.
+                result = self.service.repair(draft.id, self.owner, draft.revision, step="settings")
+                self.assertEqual(result["state"], "needs_review")
+                draft = self.stored(draft)
+                preview = self.service.preview(draft.id, self.owner)
+                self.assertEqual(preview["current_settings"]["language"], "fr")
+                self.assertEqual(preview["current_settings"]["target"], "telegram:444")
+                self.assertEqual(preview["next_action"], "acknowledge_restart")
+                self.assertEqual(preview["recorded_steps"], draft.steps)
+                self.assertNotIn("test-only-secret", repr(preview))
+                fingerprint = preview["current_settings_fingerprint"]
+                for owner, revision, expected in ((replace(self.owner, thread_id="other"), draft.revision, fingerprint),
+                                                   (self.owner, draft.revision - 1, fingerprint),
+                                                   (self.owner, draft.revision, "0" * 64)):
+                    with self.assertRaises(HostError):
+                        self.service.acknowledge(draft.id, owner, revision, current_fingerprint=expected)
+                before = (list(self.host.events), dict(self.host.passwords))
+                acknowledged = self.service.acknowledge(draft.id, self.owner, draft.revision, current_fingerprint=fingerprint)
+                self.assertEqual(acknowledged.state, "acknowledged")
+                self.assertEqual(acknowledged.original, draft.original)
+                self.assertEqual(acknowledged.candidate, draft.candidate)
+                self.assertEqual({k: v for k, v in acknowledged.steps.items() if k != "acknowledgement"}, draft.steps)
+                self.assertEqual(acknowledged.steps["acknowledgement"], {"reason": "conflict", "settings_fingerprint": fingerprint})
+                self.assertEqual((self.host.events, self.host.passwords), before)
+                self.assertEqual(self.service._secrets, {})
+                fresh = self.service.start(self.owner)
+                self.assertNotEqual(fresh.id, draft.id)
+                self.assertEqual(fresh.original, current)
+                self.assertEqual(fresh.steps, {})
+                fresh = self.change(fresh, "settings", ui_language="en")
+                self.assertEqual(self.commit(fresh)["state"], "completed")
+                self.assertEqual(self.host.load_settings(), current)
+
+    def test_unfinished_delivery_cannot_be_handed_off_as_a_paused_success(self):
+        self.host.paused = True
+        self.host.send_error = True
+        draft = self.validated()
+        self.assertEqual(self.commit(draft)["state"], "repair_required")
+        draft = self.stored(draft)
+        with self.assertRaises(HostError):
+            self.service.acknowledge(draft.id, self.owner, draft.revision,
+                                     current_fingerprint=settings_fingerprint(self.host.load_settings()))
+        self.assertEqual(self.stored(draft), draft)
+
+    def test_start_reconciles_paused_settings_conflict_and_acknowledgement_binds_review(self):
+        self.host.paused = True
+        draft = self.validated()
+        self.commit(draft)
+        self.host.settings = replace(self.host.settings, target="telegram:333")
+        draft = self.service.start(self.owner)
+        self.assertEqual(draft.state, "needs_review")
+        preview = self.service.preview(draft.id, self.owner)
+        self.host.settings = replace(self.host.settings, language="fr")
+        events = list(self.host.events)
+        with self.assertRaisesRegex(HostError, "setup_changed_retry"):
+            self.service.acknowledge(draft.id, self.owner, draft.revision,
+                                     current_fingerprint=preview["current_settings_fingerprint"])
+        self.assertEqual(self.stored(draft), draft)
+        self.assertEqual(self.host.events, events)
+        self.assertTrue(self.host.paused)
+
+    def test_interrupted_verified_rotation_resumes_existing_source_without_reinitializing(self):
+        self.commit(self.validated())
+        account = self.host.load_settings().accounts[0]
+        store = self.host.open_store()
+        self.addCleanup(store.close)
+        store.enqueue(account, 7, [101])
+        key = (account.id, account.mailbox, 7, 101)
+        store.retry(key, "credential_unavailable", self.now, permanent=True)
+        store.set_meta(f"source_hold:{account.id}", {"code": "credential_unavailable",
+                                                     "fingerprint": settings_fingerprint(self.host.load_settings())})
+        store.set_meta(f"source_retry:{account.id}", {"retry_at": self.now + 999})
+        draft = self.service.start(self.owner)
+        draft = self.change(draft, "edit", account_id=account.id)
+        draft = self.service.validate_password(draft.id, self.owner, draft.revision, "replacement")
+        save = self.service._save
+        def crash(current, **changes):
+            if "baselines" in changes.get("steps", {}):
+                raise SystemExit
+            return save(current, **changes)
+        with patch.object(self.service, "_save", side_effect=crash), self.assertRaises(SystemExit):
+            self.commit(draft)
+        self.service = self.new_service()
+        draft = self.stored(draft)
+        probes = len(self.probes)
+        result = self.service.repair(draft.id, self.owner, draft.revision, step="settings")
+        self.assertEqual(result["state"], "completed")
+        self.assertIsNone(store.get_meta(f"source_hold:{account.id}"))
+        self.assertIsNone(store.get_meta(f"source_retry:{account.id}"))
+        self.assertEqual(store.cursor(account.id), (7, 101))
+        self.assertEqual(store.due(account.id, self.now, 10)[0].key, key)
+        self.assertEqual(len(self.probes), probes)
+        self.assertEqual(self.host.load_settings(), draft.original)
+
+    def test_disabled_account_password_rotation_survives_revisions_without_enabling(self):
+        self.commit(self.validated())
+        account = self.host.load_settings().accounts[0]
+        self.host.settings = replace(self.host.settings, accounts=(replace(account, enabled=False),))
+        store = self.host.open_store()
+        self.addCleanup(store.close)
+        store.enqueue(account, 7, [101])
+        draft = self.service.start(self.owner)
+        draft = self.change(draft, "edit", account_id=account.id)
+        draft = self.service.validate_password(draft.id, self.owner, draft.revision, "disabled-replacement")
+        draft = self.change(draft, "settings", language="fr")
+        self.assertEqual(self.commit(draft)["state"], "completed")
+        self.assertEqual(self.host.passwords[account.id], "disabled-replacement")
+        self.assertFalse(self.host.load_settings().accounts[0].enabled)
+        self.assertEqual(store.cursor(account.id), (7, 101))
+        self.assertEqual(store.status()["pending"], 1)
+
+    def test_disabled_replacement_requires_reentry_after_cache_loss_and_explicit_disable_discards_it(self):
+        self.commit(self.validated())
+        account = self.host.load_settings().accounts[0]
+        self.host.settings = replace(self.host.settings, accounts=(replace(account, enabled=False),))
+        draft = self.service.start(self.owner)
+        draft = self.change(draft, "edit", account_id=account.id)
+        draft = self.service.validate_password(draft.id, self.owner, draft.revision, "must-reenter")
+        self.service = self.new_service()
+        draft = self.service.start(self.owner)
+        self.assertEqual((draft.state, draft.form["account_id"]), ("needs_secret", account.id))
+        self.assertEqual(self.commit(draft)["state"], "needs_secret")
+        draft = self.stored(draft)
+        draft = self.service.validate_password(draft.id, self.owner, draft.revision, "discard-on-disable")
+        draft = self.change(draft, "disable", account_id=account.id)
+        self.assertEqual(self.service._secrets, {})
+        self.assertEqual(self.commit(draft)["state"], "completed")
+        self.assertEqual(self.host.passwords[account.id], "test-only-secret")
+
+    def preview_at_cas_boundary(self, operation):
+        """Force a reader between durable CAS and cache rebind/install; no sleeps."""
+        boundary = threading.Event()
+        reader_results, errors, threads = [], [], []
+        lock = threading.RLock()
+        class ObservedLock:
+            def __enter__(inner):
+                if threading.current_thread() in threads:
+                    boundary.set()  # A fixed reader is now blocked on the writer.
+                lock.acquire()
+            def __exit__(inner, *exc):
+                lock.release()
+        self.service._state_lock = ObservedLock()
+        from mail_notifier.onboarding_store import SetupStore
+        cas = SetupStore.cas
+        def reader(draft):
+            try:
+                reader_results.append(self.service.preview(draft.id, draft.owner))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                # Without synchronization the reader finishes in the unsafe gap.
+                boundary.set()
+        def observed_cas(store, draft, **kwargs):
+            changed = cas(store, draft, **kwargs)
+            if not threads and draft.state == "awaiting_confirmation":
+                thread = threading.Thread(target=reader, args=(draft,))
+                threads.append(thread)
+                thread.start()
+                if not boundary.wait(5):
+                    raise AssertionError("reader did not reach the CAS/cache boundary")
+            return changed
+        try:
+            with patch.object(SetupStore, "cas", observed_cas):
+                result = operation()
+        finally:
+            for thread in threads:
+                thread.join(5)
+                self.assertFalse(thread.is_alive(), "reader deadlocked")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(reader_results), 1)
+        self.assertEqual(reader_results[0]["state"], "awaiting_confirmation")
+        return result
+
+    def test_concurrent_preview_cannot_erase_secret_during_harmless_revision(self):
+        draft = self.validated()
+        expires_at = next(iter(self.service._secrets.values())).expires_at
+        draft = self.preview_at_cas_boundary(lambda: self.change(draft, "settings", language="fr"))
+        self.assertEqual(draft.state, "awaiting_confirmation")
+        self.assertEqual(next(iter(self.service._secrets.values())).expires_at, expires_at)
+        self.assertEqual(self.commit(draft)["state"], "completed")
+
+    def test_concurrent_preview_cannot_split_validation_revision_and_secret_installation(self):
+        draft = self.service.start(self.owner)
+        draft = self.change(draft, "add", provider="gmail", username="me@example.com")
+        draft = self.preview_at_cas_boundary(lambda: self.service.validate_password(draft.id, self.owner, draft.revision, "replacement"))
+        self.assertEqual(self.commit(draft)["state"], "completed")
+
+    def test_password_validation_does_not_hold_state_lock_during_network_call(self):
+        draft = self.service.start(self.owner)
+        draft = self.change(draft, "add", provider="gmail", username="me@example.com")
+        errors = []
+        def mailbox(account, password):
+            def cancel():
+                try:
+                    current = self.stored(draft)
+                    self.service.cancel(current.id, self.owner, current.revision)
+                except BaseException as exc:
+                    errors.append(exc)
+            thread = threading.Thread(target=cancel)
+            thread.start()
+            thread.join(5)
+            self.assertFalse(thread.is_alive(), "validation holds the state lock across IMAP")
+            return FakeMailbox(account)
+        with patch.object(self.service, "mailbox_factory", mailbox), self.assertRaises(HostError):
+            self.service.validate_password(draft.id, self.owner, draft.revision, "cancelled-in-flight")
+        self.assertEqual(errors, [])
+        self.assertEqual(self.service._secrets, {})

@@ -16,10 +16,10 @@ from .hermes_host import HostError
 from .onboarding_auth import SetupOwner, owner_key
 
 _TTL = 24 * 60 * 60
-_TERMINAL = ("completed", "cancelled", "expired")
+_TERMINAL = ("completed", "cancelled", "expired", "acknowledged")
 _STATES = {"draft", "awaiting_secret", "validating", "awaiting_confirmation", "committing", "scheduled",
-           "completed", "cancelled", "expired", "needs_secret", "needs_review", "repair_required"}
-_ACTIVE = "state NOT IN ('completed','cancelled','expired')"
+           "completed", "cancelled", "expired", "acknowledged", "needs_secret", "needs_review", "repair_required"}
+_ACTIVE = "state NOT IN ('completed','cancelled','expired','acknowledged')"
 _OWNER_COLUMNS = "profile_home,surface,bot_id,user_id,chat_id,thread_id"
 _OWNER_WHERE = "profile_home=? AND surface=? AND bot_id=? AND user_id=? AND chat_id=? AND thread_id=?"
 _FORM_FIELDS = {"action", "account_id", "provider", "username", "label", "mailbox", "input_field", "prompt_message_id"}
@@ -55,8 +55,14 @@ def _form(value):
 
 def _steps(value):
     """Allow only recovery markers, never arbitrary external responses or errors."""
-    _object(value, {"credentials", "baselines", "settings_fingerprint", "cron", "test_delivery", "error_code"})
+    _object(value, {"credentials", "baselines", "settings_fingerprint", "cron", "test_delivery", "error_code", "acknowledgement"})
     result = {}
+    if "acknowledgement" in value:
+        entry = _object(value["acknowledgement"], {"reason", "settings_fingerprint"})
+        if (entry.get("reason") not in ("paused", "conflict")
+                or not _matches(entry.get("settings_fingerprint"), r"[a-f0-9]{64}")):
+            _invalid()
+        result["acknowledgement"] = dict(entry)
     for name in ("credentials", "baselines"):
         if name not in value:
             continue
@@ -156,7 +162,7 @@ class SetupStore:
             self.db.row_factory = sqlite3.Row
             with self._transaction():
                 version = self.db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1):
+                if version not in (0, 1, 2):
                     raise HostError("unsupported_setup_schema")
                 if version == 0:
                     if self.db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
@@ -167,9 +173,13 @@ class SetupStore:
                         revision INTEGER NOT NULL, state TEXT NOT NULL, original_json TEXT NOT NULL,
                         candidate_json TEXT NOT NULL, original_saved INTEGER NOT NULL, updated_at REAL NOT NULL,
                         form_json TEXT NOT NULL, steps_json TEXT NOT NULL, original_fingerprint TEXT NOT NULL)""")
+                if version < 2:
+                    # v2 only changes the terminal-state index; snapshots and
+                    # recovery evidence in existing v1 records are untouched.
+                    self.db.execute("DROP INDEX IF EXISTS one_active_owner")
                     self.db.execute(f"""CREATE UNIQUE INDEX one_active_owner
                         ON drafts(profile_home,surface,bot_id,user_id,chat_id) WHERE {_ACTIVE}""")
-                    self.db.execute("PRAGMA user_version=1")
+                    self.db.execute("PRAGMA user_version=2")
         except Exception as exc:
             if connection is not None:
                 connection.close()

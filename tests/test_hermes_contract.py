@@ -139,7 +139,7 @@ class HermesContractTests(unittest.TestCase):
         self.assertEqual((data / "setup.db").stat().st_mode & 0o777, 0o600)
         self.assertEqual(data.stat().st_mode & 0o777, 0o700)
         with closing(sqlite3.connect(data / "setup.db")) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
         other = self.root / "profile-b"
         home_token = set_hermes_home_override(str(other))
         try:
@@ -270,6 +270,46 @@ class HermesContractTests(unittest.TestCase):
             self.assertEqual(store.due("a1", 2000, 10, status="ready")[0].target, "telegram:111")
         finally:
             store.close()
+
+    def test_real_paused_cron_handoff_allows_repeated_account_management(self):
+        from dataclasses import replace
+        from mail_notifier.onboarding import OnboardingService
+        from mail_notifier.onboarding_auth import SetupOwner
+        from mail_notifier.operations import set_account_enabled
+        from tests.test_service import FakeMailbox
+        settings = Settings(accounts=(self.account,), ui_language="en")
+        self.host.save_settings(settings)
+        self.host.save_password(self.account, "test-only-paused-secret")
+        store = self.host.open_store()
+        self.addCleanup(store.close)
+        store.initialize(self.account, 7, 100)
+        store.enqueue(self.account, 7, [101])
+        job = self.host.install_schedule(settings, store)
+        self.host.manage_cron("pause", job_id=job)
+        service = OnboardingService(self.host, mailbox_factory=lambda a, p: FakeMailbox(a))
+        owner = SetupOwner(str(self.home), "cli")
+        draft = service.start(owner)
+        draft = service.change(draft.id, owner, draft.revision, action="settings", values={"language": "fr"})
+        with patch("socket.create_connection", side_effect=AssertionError("unexpected network")), patch.object(self.host, "check_environment"), patch.object(self.host, "resolve_target", return_value="telegram:123"), patch.object(self.host, "complete_structured", return_value=classification_data()), patch.object(self.host, "send", return_value={"success": True, "message_id": "42"}):
+            self.assertEqual(service.commit(draft.id, owner, draft.revision)["state"], "scheduled")
+            for enabled in (False, True, False):
+                result = set_account_enabled(self.host, self.account.id, enabled, mailbox_factory=lambda a, p: FakeMailbox(a))
+                self.assertEqual(result["enabled"], enabled)
+                self.assertEqual(result["cron_job_id"], job)
+        self.assertEqual(self.host.load_settings(), replace(settings, language="fr", accounts=(replace(self.account, enabled=False),)))
+        self.assertEqual(self.host.get_password(self.account), "test-only-paused-secret")
+        jobs = self.host.manage_cron("list", include_disabled=True)["jobs"]
+        self.assertEqual(len(jobs), 1)
+        self.assertFalse(jobs[0]["enabled"])
+        self.assertEqual(store.cursor(self.account.id), (7, 101))
+        self.assertEqual(store.status()["pending"], 1)
+        setup = self.host.open_setup_store()
+        self.addCleanup(setup.close)
+        old = setup.get(draft.id, owner)
+        self.assertEqual(old.state, "acknowledged")
+        self.assertEqual(old.original, settings)
+        self.assertEqual(old.steps["acknowledgement"]["reason"], "paused")
+        self.assertEqual(old.steps["test_delivery"]["message_id"], "42")
 
     def test_structured_facade_and_real_media_parser_accept_our_payload(self):
         from gateway.platforms.base import BasePlatformAdapter

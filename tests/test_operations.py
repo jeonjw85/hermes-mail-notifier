@@ -113,6 +113,34 @@ class OperationsTests(unittest.TestCase):
         self.module.set_account_enabled(self.host, "a1", True, mailbox_factory=mailbox)
         self.assertTrue(self.host.load_settings().accounts[0].enabled)
 
+    def test_intentionally_paused_schedule_does_not_block_subsequent_account_commands(self):
+        self.host.paused = True
+        self.module.set_account_enabled(self.host, "a1", False)
+        self.module.set_account_enabled(self.host, "a1", True, mailbox_factory=lambda a, p: FakeMailbox(a))
+        self.module.set_account_enabled(self.host, "b2", False)
+        result = self.module.set_account_enabled(self.host, "a1", False)
+        self.assertEqual(result, {"account_id": "a1", "enabled": False, "cron_job_id": "job1"})
+        self.assertTrue(self.host.paused)
+        self.assertFalse(any(a.enabled for a in self.host.load_settings().accounts))
+        self.assertEqual(self.store.cursor("a1"), (7, 101))
+        self.assertEqual(self.store.get_work(self.identifier).status, "ready")
+        self.assertEqual(self.store.get_work(self.identifier).target, "telegram:111")
+        setup = self.host.open_setup_store()
+        try:
+            self.assertEqual(setup.db.execute("SELECT count(*) FROM drafts WHERE state='acknowledged'").fetchone()[0], 3)
+        finally:
+            setup.close()
+
+    def test_account_command_cannot_implicitly_acknowledge_a_paused_settings_conflict(self):
+        self.host.paused = True
+        self.module.set_account_enabled(self.host, "a1", False)
+        self.host.settings = replace(self.host.settings, target="telegram:444")
+        with self.assertRaises(HostError):
+            self.module.set_account_enabled(self.host, "b2", False)
+        self.assertTrue(self.host.load_settings().accounts[1].enabled)
+        self.assertEqual(self.host.load_settings().target, "telegram:444")
+        self.assertTrue(self.host.paused)
+
     def test_enable_command_never_publishes_an_unconfirmed_interactive_draft(self):
         from mail_notifier.onboarding import OnboardingService
         from mail_notifier.onboarding_auth import SetupOwner

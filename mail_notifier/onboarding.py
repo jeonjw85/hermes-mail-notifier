@@ -7,6 +7,7 @@ not a guess based on whichever password happens to be readable afterwards.
 
 import copy
 import re
+import threading
 import time
 import uuid
 from contextlib import closing
@@ -22,7 +23,7 @@ from .onboarding_store import SetupDraft
 from .service import error_code
 from .triage import triage_message
 
-_TERMINAL = {"completed", "cancelled", "expired"}
+_TERMINAL = {"completed", "cancelled", "expired", "acknowledged"}
 _ACCOUNT_FIELDS = {"provider", "username", "label", "mailbox", "enabled"}
 _SETTINGS_FIELDS = {"schedule", "target", "language", "ui_language", "important_senders", "ignored_senders",
                     "always_notify_senders", "important_keywords", "importance_instructions"}
@@ -51,17 +52,19 @@ class OnboardingService:
     def __init__(self, host, *, mailbox_factory=ImapMailbox, clock=time.time):
         self.host, self.mailbox_factory, self.clock = host, mailbox_factory, clock
         self._secrets = {}
+        self._state_lock = threading.RLock()
 
     def _key(self, draft, account_id):
         return draft.id, owner_key(draft.owner), account_id
 
     def _forget(self, draft_id):
-        for key in list(self._secrets):
-            if key[0] == draft_id:
-                del self._secrets[key]
+        with self._state_lock:
+            for key in list(self._secrets):
+                if key[0] == draft_id:
+                    del self._secrets[key]
 
     def expire(self) -> None:
-        with closing(self.host.open_setup_store()) as store:
+        with self._state_lock, closing(self.host.open_setup_store()) as store:
             store.prune(now=self.clock())
             for key, secret in list(self._secrets.items()):
                 if secret.expires_at <= self.clock():
@@ -86,27 +89,32 @@ class OnboardingService:
         return draft
 
     def _save(self, draft, **changes):
-        with closing(self.host.open_setup_store()) as store:
-            changed = store.cas(replace(draft, **changes), expected_revision=draft.revision, now=self.clock())
-        accounts = {a.id: a for a in changed.candidate.accounts}
-        for key, secret in list(self._secrets.items()):
-            if key[0] != draft.id:
-                continue
-            account = accounts.get(key[2])
-            if (changed.state in _TERMINAL or account is None or not account.enabled
-                    or secret.revision != draft.revision or secret.connection != _connection(account)
-                    or secret.expires_at <= self.clock()):
-                del self._secrets[key]
-            else:
-                secret.revision = changed.revision
-        return changed
+        # Durable revision publication and cache rebinding are one short local
+        # critical section. Never hold this lock over IMAP/model/host writes.
+        with self._state_lock:
+            with closing(self.host.open_setup_store()) as store:
+                changed = store.cas(replace(draft, **changes), expected_revision=draft.revision, now=self.clock())
+            accounts = {a.id: a for a in changed.candidate.accounts}
+            for key, secret in list(self._secrets.items()):
+                if key[0] != draft.id:
+                    continue
+                account = accounts.get(key[2])
+                if (changed.state in _TERMINAL or account is None
+                        or account.id not in changed.steps.get("credentials", {})
+                        or secret.revision != draft.revision or secret.connection != _connection(account)
+                        or secret.expires_at <= self.clock()):
+                    del self._secrets[key]
+                else:
+                    secret.revision = changed.revision
+            return changed
 
     def _secret(self, draft, account):
-        secret = self._secrets.get(self._key(draft, account.id))
-        if (secret and secret.revision == draft.revision and secret.expires_at > self.clock()
-                and secret.connection == _connection(account)):
-            return secret
-        return None
+        with self._state_lock:
+            secret = self._secrets.get(self._key(draft, account.id))
+            if (secret and secret.revision == draft.revision and secret.expires_at > self.clock()
+                    and secret.connection == _connection(account)):
+                return secret
+            return None
 
     def _required(self, draft):
         original = {a.id: a for a in draft.original.accounts}
@@ -120,16 +128,16 @@ class OnboardingService:
                 return False
         for account in draft.candidate.accounts:
             marker = markers.get(account.id)
-            if account.enabled and marker is not None and not marker.get("verified") and not self._secret(draft, account):
+            if marker is not None and not marker.get("verified") and not self._secret(draft, account):
                 return False
         return True
 
     def _missing_account(self, draft):
         markers = draft.steps.get("credentials", {})
         required = {a.id for a in self._required(draft)}
-        return next((a.id for a in draft.candidate.accounts if a.enabled
-                     and ((a.id in required and a.id not in markers)
-                          or (a.id in markers and not markers[a.id].get("verified") and not self._secret(draft, a)))), "")
+        return next((a.id for a in draft.candidate.accounts
+                     if ((a.id in required and a.id not in markers)
+                         or (a.id in markers and not markers[a.id].get("verified") and not self._secret(draft, a)))), "")
 
     def start(self, owner: SetupOwner, *, detected_language: str = "") -> SetupDraft:
         if owner_key(owner)[0] != str(self.host.home().resolve()):
@@ -147,6 +155,8 @@ class OnboardingService:
                 if owner.surface == "telegram":
                     values["target"] = "telegram:" + owner.chat_id + (":" + owner.thread_id if owner.thread_id else "")
             draft = self._save(draft, candidate=replace(settings, **values))
+        if draft.state != "needs_review" and self._has_writes(draft) and self._settings_conflict(draft, settings):
+            draft = self._save(draft, state="needs_review")
         if draft.state in {"awaiting_confirmation", "validating"} and not self._ready(draft):
             draft = self._save(draft, state="needs_secret", form={**draft.form, "account_id": self._missing_account(draft)})
         return draft
@@ -155,6 +165,10 @@ class OnboardingService:
         return (draft.state in {"committing", "scheduled", "repair_required"}
                 or "settings_fingerprint" in draft.steps or bool(draft.steps.get("baselines"))
                 or any(m.get("write_started") for m in draft.steps.get("credentials", {}).values()))
+
+    def _settings_conflict(self, draft, actual):
+        return ((actual != draft.original and not (self._has_writes(draft) and actual == draft.candidate))
+                or ("settings_fingerprint" in draft.steps and actual != draft.candidate))
 
     def change(self, draft_id: str, owner: SetupOwner, revision: int, *, action: str, values: dict) -> SetupDraft:
         draft = self._read(draft_id, owner, revision)
@@ -209,7 +223,7 @@ class OnboardingService:
                 accounts.append(account)
             if action == "enable" and (not old or not old.enabled):
                 steps.get("credentials", {}).pop(account.id, None)
-            if not account.enabled:
+            if action == "disable" or (old and old.enabled and not account.enabled):
                 steps.get("credentials", {}).pop(account.id, None)
             candidate = replace(candidate, accounts=tuple(accounts))
             form = {"action": action, "account_id": account.id}
@@ -219,46 +233,59 @@ class OnboardingService:
         return self._save(changed, state="awaiting_confirmation" if self._ready(changed) else "awaiting_secret")
 
     def validate_password(self, draft_id: str, owner: SetupOwner, revision: int, password: str) -> SetupDraft:
-        draft = self._read(draft_id, owner, revision)
-        if draft.state in _TERMINAL or draft.state in {"committing", "scheduled", "repair_required", "needs_review"}:
-            raise HostError("setup_changed_retry")
-        if not isinstance(password, str) or any(c in password for c in "\r\n\x00"):
-            raise HostError("invalid_app_password")
-        account = next((a for a in draft.candidate.accounts if a.id == draft.form.get("account_id")), None)
-        if account is None:
-            raise HostError("account_not_found")
-        marker = draft.steps.get("credentials", {}).get(account.id, {})
-        # An ambiguous replacement must never be validated using the old value.
-        if not password and (marker and not marker.get("verified") or account.id not in {a.id for a in draft.original.accounts}):
-            return self._save(draft, state="needs_secret")
-        self._secrets.pop(self._key(draft, account.id), None)
-        steps = copy.deepcopy(draft.steps)
-        steps.setdefault("credentials", {})[account.id] = {"write_started": bool(marker.get("write_started")), "verified": False}
-        draft = self._save(draft, state="validating", steps=steps)
+        with self._state_lock:
+            draft = self._read(draft_id, owner, revision)
+            if draft.state in _TERMINAL or draft.state in {"committing", "scheduled", "repair_required", "needs_review"}:
+                raise HostError("setup_changed_retry")
+            if not isinstance(password, str) or any(c in password for c in "\r\n\x00"):
+                raise HostError("invalid_app_password")
+            account = next((a for a in draft.candidate.accounts if a.id == draft.form.get("account_id")), None)
+            if account is None:
+                raise HostError("account_not_found")
+            marker = draft.steps.get("credentials", {}).get(account.id, {})
+            # An ambiguous replacement must never be validated using the old value.
+            if not password and (marker and not marker.get("verified") or account.id not in {a.id for a in draft.original.accounts}):
+                return self._save(draft, state="needs_secret")
+            self._secrets.pop(self._key(draft, account.id), None)
+            steps = copy.deepcopy(draft.steps)
+            steps.setdefault("credentials", {})[account.id] = {"write_started": bool(marker.get("write_started")), "verified": False}
+            draft = self._save(draft, state="validating", steps=steps)
         try:
             value = password or self.host.get_password(account)
             with self.mailbox_factory(account, value) as mailbox:
                 mailbox.snapshot()
         except Exception as exc:
             return self._failure(draft, exc, state="awaiting_secret")
-        steps = copy.deepcopy(draft.steps)
-        steps.pop("error_code", None)
-        steps.setdefault("credentials", {})[account.id] = {"write_started": bool(marker.get("write_started")), "verified": not bool(password)}
-        draft = self._save(draft, steps=steps, state="awaiting_confirmation")
-        if password:
-            self._secrets[self._key(draft, account.id)] = _Secret(draft.revision, _connection(account), self.clock() + 600, password)
-        if not self._ready(draft):
-            draft = self._save(draft, state="awaiting_secret", form={**draft.form, "account_id": self._missing_account(draft)})
-        return draft
+        with self._state_lock:
+            # Cancellation/edits during the network call must reject this result.
+            draft = self._read(draft.id, owner, draft.revision)
+            steps = copy.deepcopy(draft.steps)
+            steps.pop("error_code", None)
+            steps.setdefault("credentials", {})[account.id] = {"write_started": bool(marker.get("write_started")), "verified": not bool(password)}
+            draft = self._save(draft, steps=steps, state="awaiting_confirmation")
+            if password:
+                self._secrets[self._key(draft, account.id)] = _Secret(draft.revision, _connection(account), self.clock() + 600, password)
+            if not self._ready(draft):
+                draft = self._save(draft, state="awaiting_secret", form={**draft.form, "account_id": self._missing_account(draft)})
+            return draft
 
     def preview(self, draft_id: str, owner: SetupOwner) -> dict:
-        draft = self._read(draft_id, owner)
-        if draft.state == "awaiting_confirmation" and not self._ready(draft):
-            draft = self._save(draft, state="needs_secret")
+        with self._state_lock:
+            draft = self._read(draft_id, owner)
+            if draft.state == "awaiting_confirmation" and not self._ready(draft):
+                draft = self._save(draft, state="needs_secret", form={**draft.form, "account_id": self._missing_account(draft)})
+        result = {**self._result(draft), **self._display_settings(draft.candidate)}
+        if draft.state in {"needs_review", "scheduled"}:
+            current = self.host.load_settings()
+            result.update(current_settings=self._display_settings(current), current_settings_fingerprint=settings_fingerprint(current),
+                          recorded_steps=copy.deepcopy(draft.steps))
+        return result
+
+    def _display_settings(self, settings):
         # Only display fields, never credential references, host objects or secrets.
-        return {**self._result(draft), "accounts": [{"account_id": a.id, "label": a.label, "provider": a.provider,
-                "username": a.username, "mailbox": a.mailbox, "enabled": a.enabled} for a in draft.candidate.accounts],
-                **{name: getattr(draft.candidate, name) for name in sorted(_SETTINGS_FIELDS)}}
+        return {"accounts": [{"account_id": a.id, "label": a.label, "provider": a.provider,
+                "username": a.username, "mailbox": a.mailbox, "enabled": a.enabled} for a in settings.accounts],
+                **{name: getattr(settings, name) for name in sorted(_SETTINGS_FIELDS)}}
 
     def _result(self, draft):
         steps = draft.steps
@@ -285,7 +312,7 @@ class OnboardingService:
         if draft.state == "scheduled" and steps.get("cron", {}).get("paused"):
             result["next_action"] = "resume_cron"
         elif draft.state == "needs_review":
-            result["next_action"] = "cancel_restart"
+            result["next_action"] = "acknowledge_restart"
         elif draft.state in {"needs_secret", "awaiting_secret"}:
             result["next_action"] = "enter_password"
         elif draft.state == "repair_required":
@@ -305,6 +332,29 @@ class OnboardingService:
         if self._has_writes(draft):
             raise HostError("setup_already_committing")
         return self._save(draft, state="cancelled")
+
+    def acknowledge(self, draft_id: str, owner: SetupOwner, revision: int, *, current_fingerprint: str) -> SetupDraft:
+        """Release an attempt after explicit review, retaining all write evidence.
+
+        This neither completes automation nor rolls anything back. A subsequent
+        start uses current settings and needs its own preview/confirmation.
+        """
+        draft = self._read(draft_id, owner, revision)
+        with closing(self.host.open_store()) as store, store.run_lock() as acquired:
+            if not acquired:
+                raise HostError("already_running")
+            draft = self._read(draft.id, owner, revision)
+            current = self.host.load_settings()
+            if current_fingerprint != settings_fingerprint(current):
+                raise HostError("setup_changed_retry")
+            paused = (draft.state == "scheduled" and current == draft.candidate
+                      and "settings_fingerprint" in draft.steps and draft.steps.get("cron", {}).get("paused")
+                      and bool(draft.steps.get("test_delivery", {}).get("message_id")))
+            if draft.state != "needs_review" and not paused:
+                raise HostError("setup_changed_retry")
+            steps = {**draft.steps, "acknowledgement": {"reason": "paused" if paused else "conflict",
+                                                       "settings_fingerprint": current_fingerprint}}
+            return self._save(draft, state="acknowledged", steps=steps)
 
     def commit(self, draft_id: str, owner: SetupOwner, revision: int, *, resume_cron: bool = False) -> dict:
         if type(resume_cron) is not bool:
@@ -358,6 +408,15 @@ class OnboardingService:
             raise HostError("setup_confirmation_required")
         if draft.state == "needs_review":
             return self._result(draft)
+        # Check conflicts before asking for more secrets or doing slow repair
+        # probes. Recheck again in _publish after those probes.
+        with closing(self.host.open_store()) as store, store.run_lock() as acquired:
+            if not acquired:
+                return self._result(draft) | {"error": "already_running", "next_action": "retry"}
+            draft = self._read(draft.id, owner, revision)
+            actual = self.host.load_settings()
+            if self._settings_conflict(draft, actual):
+                return self._result(self._save(draft, state="needs_review"))
         # No readback heuristic can prove an interrupted password-only write.
         if any(not m.get("verified") for m in draft.steps.get("credentials", {}).values()):
             self._forget(draft.id)
@@ -384,9 +443,7 @@ class OnboardingService:
                 published = "settings_fingerprint" in draft.steps
                 recovering = self._has_writes(draft)
                 same_candidate = actual == draft.candidate
-                if actual != draft.original and not (recovering and same_candidate):
-                    return self._result(self._save(draft, state="needs_review"))
-                if published and not same_candidate:
+                if self._settings_conflict(draft, actual):
                     return self._result(self._save(draft, state="needs_review"))
                 if not published and not self._ready(draft):
                     return self._result(self._save(draft, state="needs_secret"))
@@ -420,6 +477,7 @@ class OnboardingService:
                             baseline = steps["baselines"].get(account.id)
                             if baseline:
                                 store.initialize(account, baseline["uidvalidity"], baseline["last_uid"])
+                            if baseline or steps.get("credentials", {}).get(account.id, {}).get("verified"):
                                 store.resume_source(account.id, self.clock())
                         if not (recovering and same_candidate):
                             self.host.save_settings(draft.candidate)

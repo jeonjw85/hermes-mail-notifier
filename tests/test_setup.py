@@ -139,3 +139,39 @@ class SetupRecoveryTests(unittest.TestCase):
         self.assertEqual(self.run_setup(["yes", "gmail", "me@example.com", "no", "no", "yes"]), 0)
         self.assertEqual(self.host.load_settings().language, "fr")
         self.assertEqual(self.host.load_settings().target, "telegram")
+
+    def test_paused_setup_can_continue_account_management_without_resuming(self):
+        self.host.paused = True
+        self.assertEqual(self.run_setup(["gmail", "me@example.com", "no", "no", "yes"]), 1)
+        account = self.host.settings.accounts[0]
+        self.assertEqual(self.run_setup(["no", "yes", "edit", account.id, "", "", "Renamed", "", "done", "no", "yes"],
+                                        ("replacement",)), 1)
+        self.assertEqual(self.host.load_settings().accounts[0].label, "Renamed")
+        self.assertEqual(self.host.passwords[account.id], "replacement")
+        self.assertTrue(self.host.paused)
+        self.assertIn("Automatic checks remain paused", self.output.getvalue())
+        self.assertNotIn("Setup complete", self.output.getvalue())
+
+    def test_post_publication_conflict_can_be_reviewed_acknowledged_and_restarted(self):
+        from mail_notifier.onboarding import OnboardingService
+        from mail_notifier.onboarding_auth import SetupOwner
+        self.host.cron_failure = True
+        self.assertEqual(self.run_setup(["gmail", "me@example.com", "no", "no", "yes"]), 1)
+        self.host.cron_failure = False
+        self.host.settings = replace(self.host.settings, language="fr", target="telegram:555")
+        service = OnboardingService(self.host)
+        owner = SetupOwner(str(self.host.home()), "cli")
+        draft = service.start(owner)
+        self.assertEqual(self.run_setup(["yes", "done", "no", "no"]), 1)
+        self.assertEqual(self.host.load_settings().language, "fr")
+        self.assertEqual(self.host.load_settings().target, "telegram:555")
+        self.assertIn('"current_settings"', self.output.getvalue())
+        self.assertIn("not rolled back", self.output.getvalue())
+        setup = self.host.open_setup_store()
+        try:
+            old = setup.get(draft.id, owner)
+            self.assertEqual(old.state, "acknowledged")
+            self.assertEqual(old.steps["credentials"], draft.steps["credentials"])
+            self.assertIn("settings_fingerprint", old.steps)
+        finally:
+            setup.close()

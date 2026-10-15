@@ -153,7 +153,9 @@ class _Terminal:
 
     def preview(self):
         self.say("setup.preview")
-        print(json.dumps(self.service.preview(self.draft.id, self.draft.owner), ensure_ascii=False, indent=2))
+        preview = self.service.preview(self.draft.id, self.draft.owner)
+        print(json.dumps(preview, ensure_ascii=False, indent=2))
+        return preview
 
     def result(self, result):
         if result["state"] == "completed":
@@ -181,24 +183,32 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
         draft = service.start(SetupOwner(str(host.home()), "cli"), detected_language=language)
         terminal = _Terminal(host, service, draft, read, read_secret, language)
         terminal.say("setup.title")
-        if draft.state in {"committing", "repair_required", "scheduled"}:
-            terminal.preview()
-            resume = draft.state == "scheduled" and terminal.yes("setup.resume")
-            if not resume and not terminal.yes("setup.repair"):
+        if draft.state == "scheduled":
+            preview = terminal.preview()
+            if terminal.yes("setup.resume"):
+                return terminal.result(service.repair(draft.id, draft.owner, draft.revision, step="cron", resume_cron=True))
+            if not terminal.yes("setup.continue_paused"):
                 return terminal.result(service.preview(draft.id, draft.owner))
-            step = "cron" if draft.state == "scheduled" else "test_delivery" if "cron" in draft.steps else "cron" if "settings_fingerprint" in draft.steps else "settings"
-            return terminal.result(service.repair(draft.id, draft.owner, draft.revision, step=step, resume_cron=resume))
-        if draft.state == "needs_review":
+            service.acknowledge(draft.id, draft.owner, draft.revision,
+                                current_fingerprint=preview["current_settings_fingerprint"])
+            terminal.say("setup.paused_management")
+            terminal.draft = service.start(draft.owner, detected_language=language)
+        elif draft.state in {"committing", "repair_required"}:
             terminal.preview()
+            if not terminal.yes("setup.repair"):
+                return terminal.result(service.preview(draft.id, draft.owner))
+            step = "test_delivery" if "cron" in draft.steps else "cron" if "settings_fingerprint" in draft.steps else "settings"
+            return terminal.result(service.repair(draft.id, draft.owner, draft.revision, step=step))
+        if draft.state == "needs_review":
+            preview = terminal.preview()
+            terminal.say("setup.review_external")
             if terminal.yes("setup.restart"):
-                try:
-                    service.cancel(draft.id, draft.owner, draft.revision)
-                except HostError:
-                    terminal.say("setup.review_external")
-                else:
-                    return setup_plugin(host, read=read, read_secret=read_secret, mailbox_factory=mailbox_factory,
-                                        account_action=account_action, account_id=account_id, ui_language=ui_language)
-            return terminal.result(service.preview(draft.id, draft.owner))
+                service.acknowledge(draft.id, draft.owner, draft.revision,
+                                    current_fingerprint=preview["current_settings_fingerprint"])
+                terminal.draft = service.start(draft.owner, detected_language=language)
+            else:
+                return terminal.result(preview)
+        draft = terminal.draft
         if ui_language:
             values = {"ui_language": language}
             if not draft.original_saved:

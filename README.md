@@ -86,7 +86,9 @@ New-installation defaults are **every 5 minutes**, **summaries in the selected/d
 
 Only **mail arriving after an account is first connected** is checked; existing mail is not sent in bulk. New mail is processed even if it has already been read. Changing a label, password, or importance criteria does not reset the starting point. Changing the service, login ID, or mailbox disables the old connection and creates a new one.
 
-Re-running setup preserves an existing cron job's paused state and reports `scheduled` / `resume_cron`, not automatic-check completion. Re-run `setup` to explicitly approve resuming it, or use `hermes cron resume JOB_ID`. Disabling all accounts also pauses the cron job.
+Re-running setup preserves an existing cron job's paused state and reports `scheduled` / `resume_cron`, not automatic-check completion. Re-run `setup` to explicitly approve resuming it, or keep it paused and continue account management. Explicit `accounts enable/disable` commands can also continue management without resuming automation. The prior attempt is retained as `acknowledged`, not completed. Disabling all accounts also pauses the cron job. You can resume separately with `hermes cron resume JOB_ID`.
+
+After a settings conflict, setup shows the prior candidate and `current_settings`. You can explicitly acknowledge the old attempt and review a new draft from current settings. External-write evidence is retained; nothing is rolled back or automatically merged, and new changes require confirmation.
 
 ### Languages
 

@@ -151,6 +151,13 @@ def set_account_enabled(host, account_id, enabled, *, mailbox_factory=ImapMailbo
     service = OnboardingService(host, mailbox_factory=mailbox_factory)
     owner = SetupOwner(str(host.home()), "cli")
     draft = service.start(owner)
+    if draft.state == "scheduled":
+        # An explicit account command also hands off a fully published paused
+        # attempt. It never resumes cron or adopts that attempt's old inputs.
+        preview = service.preview(draft.id, owner)
+        service.acknowledge(draft.id, owner, draft.revision,
+                            current_fingerprint=preview["current_settings_fingerprint"])
+        draft = service.start(owner)
     # This existing explicit command is the confirmation. Never adopt and
     # publish unrelated inputs left by an interactive setup session.
     expected = replace(draft.original, ui_language=resolve_ui_language(saved=draft.original.ui_language))

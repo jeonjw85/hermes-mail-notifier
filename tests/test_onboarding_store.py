@@ -143,7 +143,7 @@ class SetupStoreTests(unittest.TestCase):
         self.assertNotEqual(self.create_at(87400).id, draft.id)
 
     def test_terminal_records_cannot_be_changed_and_are_pruned_at_24_hours(self):
-        for index, state in enumerate(("completed", "cancelled")):
+        for index, state in enumerate(("completed", "cancelled", "acknowledged")):
             owner = replace(self.owner, bot_id=str(100 + index))
             draft = self.store.create(owner, Settings(), original_saved=False, now=1000)
             terminal = self.store.cas(replace(draft, state=state), expected_revision=0, now=1001)
@@ -249,6 +249,36 @@ class SetupStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall(), [("unrelated",)])
+
+    def test_v1_upgrade_preserves_evidence_and_acknowledged_attempt_releases_owner(self):
+        draft = self.create()
+        steps = {"credentials": {"a1": {"write_started": True, "verified": False}}}
+        draft = self.store.cas(replace(draft, state="needs_review", steps=steps), expected_revision=0, now=1001)
+        # Reproduce the exact v1 partial index, including on already-upgraded test DBs.
+        self.store.db.execute("DROP INDEX one_active_owner")
+        self.store.db.execute("""CREATE UNIQUE INDEX one_active_owner ON drafts(profile_home,surface,bot_id,user_id,chat_id)
+            WHERE state NOT IN ('completed','cancelled','expired')""")
+        self.store.db.execute("PRAGMA user_version=1")
+        upgraded = self.open_store()
+        self.assertEqual(upgraded.db.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(upgraded.get(draft.id, self.owner), draft)
+        steps = {**steps, "acknowledgement": {"reason": "conflict", "settings_fingerprint": "a" * 64}}
+        closed = upgraded.cas(replace(draft, state="acknowledged", steps=steps), expected_revision=1, now=1002)
+        fresh = upgraded.create(self.owner, Settings(language="fr"), original_saved=True, now=1003)
+        self.assertNotEqual(fresh.id, closed.id)
+        self.assertEqual(upgraded.get(closed.id, self.owner), closed)
+        self.assertEqual(closed.original, draft.original)
+        self.assertEqual(closed.steps["credentials"], draft.steps["credentials"])
+        self.assertEqual(closed.form, {})
+
+    def test_acknowledgement_accepts_only_a_typed_reason_and_reviewed_fingerprint(self):
+        draft = self.create()
+        for entry in ({"reason": "rollback", "settings_fingerprint": "a" * 64},
+                      {"reason": "conflict", "settings_fingerprint": "secret"},
+                      {"reason": "paused", "settings_fingerprint": "a" * 64, "password": "secret"},
+                      {"reason": "paused"}, {"settings_fingerprint": "a" * 64}):
+            with self.subTest(entry=entry), self.assertRaisesRegex(HostError, "invalid_setup_draft"):
+                self.store.cas(replace(draft, steps={"acknowledgement": entry}), expected_revision=0, now=1001)
 
 
 if __name__ == "__main__":

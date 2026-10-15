@@ -31,7 +31,7 @@ Requirements:
 
 Scheduled runs reload credentials in a new process. Store model and Telegram credentials in the same profile's Hermes configuration (`.env`, authentication files, or a reloadable secret source). The `setup` preflight check detects **credentials available only through shell/systemd environment variables** and reports them before enabling the scheduled job. Save those credentials in the profile's Hermes configuration, then run setup again.
 
-Host integration contracts have been verified against Hermes source revision `d5aa9d7adf308ca466a118206c201254cf3ca977`. The plugin has no additional Python runtime dependencies.
+Host integration contracts have been verified against Hermes source revision `d5aa9d7adf308ca466a118206c201254cf3ca977`. The plugin declares `cryptography>=50.0.1,<51` as a Python runtime dependency for encrypted credential input. Ensure it is installed in the same Python environment as Hermes (for a source checkout, `python -m pip install -e .`). Telegram SDK modules are loaded lazily from Hermes; they are not a separate plugin dependency. If cryptography is missing, encrypted input fails closed before a credential is requested; existing check/status commands and plugin registration remain available. Node is only used for development/CI interoperability tests, not at runtime.
 
 ## Verification and Release Status
 

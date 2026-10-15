@@ -31,7 +31,7 @@ hermes mail-notifier setup --ui-language ko
 
 예약 실행은 새 프로세스에서 인증을 다시 읽습니다. 모델·Telegram 인증은 같은 프로필의 Hermes 설정 (`.env`, 인증 파일, 재로드 가능한 비밀정보 소스)에 저장되어 있어야 합니다. **셸/systemd 환경변수에만 있는 인증 값**은 `setup`의 사전 검사에서 감지해 예약 작업을 활성화하기 전에 안내합니다. 해당 프로필의 Hermes 설정으로 인증을 저장한 뒤 다시 실행하세요.
 
-Hermes 소스 `d5aa9d7adf308ca466a118206c201254cf3ca977`에서 실제 호스트 계약을 검증했습니다. 플러그인의 추가 Python 런타임 의존성은 없습니다.
+Hermes 소스 `d5aa9d7adf308ca466a118206c201254cf3ca977`에서 실제 호스트 계약을 검증했습니다. 암호화된 자격증명 입력을 위해 `cryptography>=50.0.1,<51`을 Python 런타임 의존성으로 선언합니다. Hermes와 동일한 Python 환경에 설치되어 있어야 합니다 (소스 체크아웃에서는 `python -m pip install -e .`). Telegram SDK는 Hermes에서 필요한 시점에 불러오며 플러그인의 별도 의존성이 아닙니다. cryptography가 없으면 자격증명을 요청하기 전에 암호화 입력이 안전하게 차단되며 기존 check/status 명령과 플러그인 등록은 계속 사용할 수 있습니다. Node는 개발·CI 상호운용성 테스트 전용이며 실행 시에는 필요하지 않습니다.
 
 ## 검증과 출시 상태
 

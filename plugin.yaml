@@ -13,7 +13,7 @@ provides_tools:
 config_schema:
   credential_page_url:
     type: string
-    description: "Operator-configured trusted HTTPS credential page. No public deployment is assumed; empty disables secure input only."
+    description: "Operator-only trusted HTTPS v1 page (web/credentials/v1/). No verified public default; empty disables new secure input, not existing checks or non-secret management."
     default: ""
   configuration:
     type: dict

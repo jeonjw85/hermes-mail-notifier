@@ -289,6 +289,7 @@ class TelegramOnboarding:
                     raise HostError("setup_changed_retry")
                 base = resource.host.credential_page_url()
                 if not base:
+                    view["error"] = "credential_page_unavailable"
                     view["text"] += "\n" + text("telegram.url_unavailable", "en") + "\n" + text("telegram.url_unavailable", "ko")
                     return view
                 account = next(a for a in draft.candidate.accounts if a.id == draft.form.get("account_id"))

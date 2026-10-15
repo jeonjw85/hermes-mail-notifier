@@ -1,0 +1,20 @@
+# Deny by default: no credentials, databases, virtualenvs, Git or local records.
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!__init__.py
+!plugin.yaml
+!mail_notifier/
+!mail_notifier/*.py
+!tests/
+!tests/*.py
+!tests/container/
+!tests/container/*.py
+!tests/container/Dockerfile
+!web/
+!web/credentials/
+!web/credentials/v1/
+!web/credentials/v1/*.html
+!web/credentials/v1/*.mjs
+!web/credentials/v1/*.css

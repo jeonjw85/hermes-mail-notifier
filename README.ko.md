@@ -29,6 +29,7 @@ hermes mail-notifier setup --ui-language ko
 필요한 환경:
 - Linux 또는 macOS, Python 3.11 이상. 실행 시에는 설치된 Hermes의 Python을 사용합니다.
 - native plugins, plugin CLI, `ctx.llm.complete_structured`, profile-scoped settings/storage, script-only cron, `hermes send --json`을 지원하는 Hermes.
+- Telegram 설정에는 `post_gateway_admission`, native Telegram 핸들러 등록·unload 콜백, 인증된 프로필 라우팅과 실제 대화 origin 문맥도 필요합니다. 구형·미호환 호스트는 설정을 안전하게 차단합니다 (`incompatible_hermes_onboarding`). 기존 명령은 각자의 호스트 계약이 지원되는 범위에서 유지합니다. Windows 플러그인 호스트는 지원하지 않습니다.
 - 현재 프로필의 모델과 Telegram 연결. 자동 확인에는 해당 프로필의 **Hermes gateway가 실행 중**이어야 합니다.
 
 예약 실행은 새 프로세스에서 인증을 다시 읽습니다. 모델·Telegram 인증은 같은 프로필의 Hermes 설정 (`.env`, 인증 파일, 재로드 가능한 비밀정보 소스)에 저장되어 있어야 합니다. **셸/systemd 환경변수에만 있는 인증 값**은 `setup`의 사전 검사에서 감지해 예약 작업을 활성화하기 전에 안내합니다. 해당 프로필의 Hermes 설정으로 인증을 저장한 뒤 다시 실행하세요.
@@ -41,7 +42,35 @@ Hermes 소스 `d5aa9d7adf308ca466a118206c201254cf3ca977`에서 실제 호스트 
 
 공개 호스팅·Pages 활성화와 릴리스 기본 자격증명 페이지 URL은 아직 설정되지 않았습니다. Android·iOS·Desktop의 실제 reply-keyboard·암호화 반환, 서비스별 계정·모델·전송, 원격·컨테이너·인바운드 차단 배포 검증은 출시 게이트로 남아 있습니다. 어떤 Telegram 클라이언트·배포 형태도 실제 검증 완료로 주장하지 않습니다. Mini App에는 HTTPS와 Telegram·Web Crypto 지원이 필요하지만 설치자의 대시보드·도메인·인바운드 포트는 필요하지 않습니다. 페이지 사용 불가는 자격증명 입력만 제한하며 기존 알림·비밀정보 없는 관리는 유지됩니다. 보안 입력을 쓸 수 없으면 일반 대화가 아닌 선택 가능한 CLI를 사용하세요.
 
+| 호환성 대상 | 현재 근거·한계 |
+| --- | --- |
+| Linux/macOS·Python 3.11+ 플러그인 코드 | CI는 Ubuntu 3.11·3.14를 대상으로 하며 고정 호스트 계약은 3.14에서 실행합니다. 해당 Hermes 릴리스 자체가 모든 구형 Python에서 실행된다는 뜻은 아닙니다. |
+| 로컬·원격·NAT·대시보드 없음 | 기존 봇·아웃바운드 연결을 사용합니다. 새 listener·도메인·대시보드·두 번째 `getUpdates` 프로세스는 없습니다. 실제 배포 시험은 미완료입니다. |
+| Docker 프로필 볼륨 | 아래 오프라인 두 컨테이너 write/resume smoke로 안전하게 생성한 합성 프로필의 한영 복구와 플러그인 데이터·인증의 0700/0600 권한을 검사합니다. 실제 메일·Telegram, 불안전한 프로필 권한 복구나 임의 UID·볼륨 정책 검증은 아닙니다. |
+| Telegram Android·iOS·Desktop | 후보 클라이언트이며 실제 지원 버전은 아직 기록되지 않았습니다. 각 버전에서 reply **KeyboardButton** 실행과 암호화 `sendData` 반환을 확인해야 합니다. |
+| Telegram Web·기타 클라이언트 | 브리지가 감지되어도 실제 검증 전에는 지원을 주장하지 않습니다. Web Crypto·브리지 미지원이나 페이지 차단 시 보안 입력을 사용할 수 없습니다. |
+| 일반 브라우저·inline/menu Mini App 실행 | 지원하는 자격증명 반환 경로가 아닙니다. 비밀번호를 일반 대화로 보내 우회하지 마세요. |
+
+클라이언트는 HTTPS 정적 페이지·Telegram에 접속해야 합니다. Hermes 호스트에는 별도로 Telegram API, 서비스별 IMAP/TLS (993), 설정한 모델·인증 endpoint로의 아웃바운드 연결이 필요합니다. 기존 Telegram polling/webhook 방식과 그 네트워크 요구사항을 변경하지 않습니다.
+
+### 운영자 전용 자격증명 페이지 설정
+
+현재 프로필의 **`HERMES_HOME/config.yaml`**에서 정확한 키는 **`plugins.entries.hermes-mail-notifier.settings.credential_page_url`**입니다. `settings.configuration` 내부가 아닌 같은 단계에 있습니다. 기존 설정에 병합하고 다른 플러그인·프로필 설정을 덮어쓰지 마세요.
+
+```yaml
+plugins:
+  entries:
+    hermes-mail-notifier:
+      settings:
+        credential_page_url: ""
+```
+
+위 빈 값은 의도적이며 사용 가능한 공개 URL이 아닙니다. 운영자만 이 저장소의 **`web/credentials/v1/` 프로토콜을 제공하는 신뢰·검증된 HTTPS 페이지** 주소로 바꾸고 gateway를 재로드하세요. userinfo·fragment·HTTPS 아닌 URL과 미지원 wire 버전은 거부합니다. 생성되는 공개 challenge는 `#mn=...` fragment에 있으며 비밀번호가 아닙니다. 대화 입력·`mail_notifier_setup`·정책 도구는 호스팅 주소를 바꿀 수 없습니다. 페이지 운영자는 비밀번호를 볼 수 있는 JavaScript를 제공할 수 있으므로 운영자를 신뢰·검증해야 합니다. 암호화는 전송 보호이며 페이지 진위나 발신자 인증의 증거가 아닙니다.
+
+`.github/workflows/pages.yml`은 **수동 `workflow_dispatch` 전용**으로 **`web`만** 게시하도록 준비하며 사이트 루트 아래 `/credentials/v1/`을 유지합니다. `github-pages` 환경과 좁은 배포 권한을 사용합니다. Pages 활성화나 공개 페이지 도달 가능성을 보장하지 않습니다. 이번 작업에는 활성화·dispatch·배포·검증된 기본 URL이 포함되지 않습니다. 이후 운영자 승인 출시에서 실제 HTTPS URL과 v1 프로토콜을 확인한 뒤 기본값을 지정해야 하며 새 프로토콜로 v1 경로를 덮어쓰면 안 됩니다. 직접 호스팅은 선택 사항이지 모든 설치자의 필수 준비물이 아닙니다. 신뢰하는 페이지가 없으면 `hermes mail-notifier setup --ui-language ko`의 비표시 터미널 입력을 사용하세요. 기존 확인·비밀정보 없는 관리는 유지합니다.
+
 ```sh
+# 먼저 개발·검증 절의 고정 parser·SDK 의존성을 준비하세요.
 python -m pip install -e '.[dev]'
 python -m unittest discover -s tests
 python -m ruff check .
@@ -222,8 +251,10 @@ Hermes 대화에서도 `mail_notifier_check`, `mail_notifier_status` 도구를 �
 현재 프로필의 `HERMES_HOME` 기준:
 
 - 일반 설정: `config.yaml`의 `plugins.entries.hermes-mail-notifier.settings.configuration` (계정·목적지를 하나의 스냅샷으로 저장)
+- 신뢰하는 입력 페이지: `config.yaml`의 `plugins.entries.hermes-mail-notifier.settings.credential_page_url` (운영자 전용·기본값은 빈 문자열)
 - 앱 비밀번호: Hermes 자격증명 저장 경로의 `HERMES_MAIL_<ACCOUNT_ID>_APP_PASSWORD`
 - UID 기준점·대기 알림·처리 이력: `plugin-data/hermes-mail-notifier/data.db`
+- 비밀정보 없는 설정 초안·복구 증거: `plugin-data/hermes-mail-notifier/setup.db` (schema v2, 확인 대기 비밀번호·전송 개인키·암호문은 저장하지 않음)
 - cron 실행 진입점: `scripts/hermes-mail-notifier.py`
 
 전체 원문·첨부파일은 저장하지 않습니다. 판단 대기 중인 정규화 본문은 최대 12,000자로 임시 저장하고 판단 완료 시 제거합니다. 7일이 지나면 캐시를 비우고 필요할 때 다시 수집합니다. 판단 이유·근거·요약과 완료 이력은 30일 보존합니다. 미완료 알림은 재시도에 재사용합니다. 기본 상태 출력에는 메일 본문·요약이 포함되지 않습니다. 설정·비밀번호·DB는 설치 코드 밖에 있습니다.
@@ -259,21 +290,39 @@ hermes plugins remove hermes-mail-notifier
 
 ## 개발·검증
 
-기본 테스트는 외부 서비스·자격증명·추가 패키지가 필요 없습니다.
+선언한 런타임·개발 의존성을 먼저 설치하세요. 호환성 시험은 고정 Hermes cron parser·Telegram SDK도 사용하므로 위 revision의 소스를 형제 경로 `../hermes`에 준비하고 Telegram extra를 설치합니다. 해당 호스트의 core 의존성은 Python 3.14+ 조건이 있으므로 3.11에서는 parser import용 두 의존성을 명시적으로 설치합니다. 전체 호스트의 3.11 지원 인증은 아닙니다. 기본 테스트에는 실제 서비스·인증이 필요 없으며 호스트 전용 시험은 `HERMES_CONTRACT=1`이 아니면 의도적으로 skip합니다. Node **24**는 개발·CI 전용이며 실제 Web Crypto 상호운용성에는 의존성이 설치된 같은 Python을 사용합니다.
 
 ```sh
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q __init__.py mail_notifier tests
+python -m pip install -e '.[dev]'
+python -m pip install -e '../hermes[telegram]'
+# Python 3.11 parser 전용 import 의존성:
+python -m pip install 'ruamel.yaml==0.18.16' 'python-dotenv==1.2.2'
+python -m unittest discover -s tests -v
+python -m compileall -q __init__.py mail_notifier tests
+python -m ruff check .
+python -m pyright
+PYTHON=python node --test tests/web/*.test.mjs
+python -m tests.load_scenario --output load-report.json
 ```
 
-Hermes가 설치된 Python 환경에서는 실제 호스트 계약도 확인할 수 있습니다. 테스트는 임시 프로필을 사용하고 외부 메일·모델·Telegram에 접속하지 않습니다.
+호스트 게이트에는 같은 Python 3.14 환경에 Hermes 소스 `d5aa9d7adf308ca466a118206c201254cf3ca977`과 **Telegram extra**를 설치한 뒤 플러그인·개발 의존성을 설치하세요. CI는 실제 호스트·SDK import 후 전체 시험을 `HERMES_CONTRACT=1`로 실행하고 실패뿐 아니라 **어떤 skip도 허용하지 않습니다**. 임시 합성 프로필·외부 서비스 대역을 사용하므로 실제 서비스의 인증·전송 시험은 아닙니다.
 
 ```sh
-hermes plugins doctor . --ci
-HERMES_CONTRACT=1 python -m unittest tests.test_hermes_contract -v
+python -c 'import cryptography, telegram; from hermes_cli.plugins import PluginContext, PluginManager; from gateway.run import GatewayRunner; from plugins.platforms.telegram.adapter import TelegramAdapter'
+HERMES_CONTRACT=1 python -m unittest discover -s tests -v
+HERMES_CONTRACT=1 python -m unittest tests.test_hermes_contract tests.test_telegram_contract -v
 ```
 
-CI는 Ubuntu의 Python 3.11과 3.14에서 기본 테스트·구문 검사를 실행합니다.
+CI는 Python 3.11·3.14에서 의존성 설치 → unittest → compileall → ruff/pyright → Node 24 web/interop 순서로 실행하며 별도 작업으로 고정 호스트·중단 복구·50계정/10,000건 load 검사를 유지합니다. workflow·설정 검증은 HTTPS 도달 가능성이나 실제 기기의 안전성을 증명하지 않습니다.
+
+인바운드를 열지 않는 오프라인 Docker 검사 (daemon과 빌드 시 인터넷 필요):
+
+```sh
+docker build -f tests/container/Dockerfile -t mail-onboarding-smoke .
+python tests/container/run.py
+```
+
+allowlist 빌드 context는 `.env`·DB·`.venv`·`.git`·로컬 에이전트/계획/런타임 기록을 제외합니다. 네트워크 차단 실행 전에 의존성·고정 호스트·Telegram extra를 이미지에 설치합니다. runner는 UUID 이름의 임시 볼륨 하나를 만들고 서로 다른 write/resume 컨테이너에 **해당 프로필 볼륨만** mount합니다. 두 실행 모두 `--rm --network none`이며 **공개 포트가 없고** 자신이 만든 볼륨만 정리합니다. 외부 Telegram·IMAP·모델 동작은 대역이며 출력에도 표시합니다. daemon·빌드·실행이 불가능하면 미수행이지 지원 완료가 아닙니다. 오프라인 smoke가 성공해도 공개 HTTPS·실제 클라이언트 버전·새/기존 실제 프로필·원격/컨테이너 배포·네이버/다음/Gmail 로그인·합성 모델 진단·Telegram 수신·이후 새 메일 알림의 한영 확인은 별도 운영자 승인 출시 게이트로 남습니다. 승인 없이 실제 프로필에서 live 명령을 실행하지 마세요.
 
 ## 라이선스
 

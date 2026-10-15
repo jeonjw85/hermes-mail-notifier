@@ -29,6 +29,7 @@ Run installation and setup in **the same Hermes profile that already uses Telegr
 Requirements:
 - Linux or macOS with Python 3.11 or later. The plugin runs with the Python interpreter used by your Hermes installation.
 - Hermes with native plugins, plugin CLI commands, `ctx.llm.complete_structured`, profile-scoped settings/storage, script-only cron, and `hermes send --json`.
+- Telegram onboarding additionally needs `post_gateway_admission`, native Telegram handler registration and unload callbacks, authenticated profile routing, and live-origin context. Older/incompatible hosts fail closed for onboarding (`incompatible_hermes_onboarding`); existing commands remain available where their own host contracts are supported. Windows plugin hosts are not supported.
 - A configured model and Telegram connection in the current profile. Automatic checks require that profile's **Hermes gateway to be running**.
 
 Scheduled runs reload credentials in a new process. Store model and Telegram credentials in the same profile's Hermes configuration (`.env`, authentication files, or a reloadable secret source). The `setup` preflight check detects **credentials available only through shell/systemd environment variables** and reports them before enabling the scheduled job. Save those credentials in the profile's Hermes configuration, then run setup again.
@@ -41,7 +42,35 @@ Offline verification includes pinned-Hermes admission/loader/reload contracts, e
 
 Public hosting/Pages activation and a release-default credential-page URL remain unconfigured. Live Android/iOS/Desktop reply-keyboard and encrypted-return checks, provider accounts, model/delivery verification, and the remote/container/no-inbound deployment matrix remain release gates. No Telegram client or deployment form is claimed live-verified. The Mini App needs HTTPS and Telegram/Web Crypto support; it does not require an installer dashboard, domain or inbound port. A blocked/unavailable page affects credential entry, not existing notifications or non-secret management. Use the optional CLI rather than plaintext chat if secure entry is unavailable.
 
+| Compatibility target | Current evidence / limit |
+| --- | --- |
+| Linux/macOS; Python 3.11+ plugin code | CI targets Ubuntu 3.11 and 3.14; pinned-host contracts use 3.14. This is not a claim that the pinned Hermes release itself runs on every older Python. |
+| Local/remote/NAT/no dashboard | Same bot and outbound connections; no new listener, domain, dashboard, or second `getUpdates` consumer. Live deployment checks remain pending. |
+| Docker profile volume | Offline two-container write/resume smoke below; checks Korean/English recovery and 0700/0600 plugin data/credential permissions in a securely created synthetic profile. Not live mail/Telegram, insecure-profile repair or arbitrary UID/volume-policy proof. |
+| Telegram Android/iOS/Desktop | Candidate clients, but no actual supported versions recorded yet. Reply **KeyboardButton** launch and encrypted `sendData` must be verified on each. |
+| Telegram Web/other clients | Not claimed supported until actually verified, even if a bridge is detected. Missing Web Crypto/bridge or a blocked page prevents secure input. |
+| Ordinary browser, inline/menu Mini App launch | Not supported credential-return paths; never paste a password into chat to bypass this. |
+
+The client needs access to the HTTPS static page and Telegram. The Hermes host separately needs outbound Telegram API, provider IMAP/TLS (993), and its configured model/auth endpoints. This does not change the existing Telegram polling/webhook mode or eliminate its existing network requirements.
+
+### Operator-only credential-page configuration
+
+In the active profile's **`HERMES_HOME/config.yaml`**, the exact key is **`plugins.entries.hermes-mail-notifier.settings.credential_page_url`**, alongside (not inside) `settings.configuration`. Merge into the existing configuration; do not replace other plugin/profile settings:
+
+```yaml
+plugins:
+  entries:
+    hermes-mail-notifier:
+      settings:
+        credential_page_url: ""
+```
+
+The empty value above is intentional, not a usable public URL. Only an operator may replace it with a trusted, verified **HTTPS page serving this repository's `web/credentials/v1/` protocol** and reload the gateway. Userinfo, fragments, non-HTTPS URLs and incompatible wire versions are rejected. The generated public challenge is in the `#mn=...` fragment, never a password. Neither chat input, `mail_notifier_setup`, nor policy tools can change the hosting URL. The page operator can serve JavaScript that sees the password: trust and verify that operator; encryption is transport protection, not proof of page authenticity or sender authorization.
+
+`.github/workflows/pages.yml` prepares a **manual `workflow_dispatch` only** publication of **`web`**, preserving `/credentials/v1/` beneath the site's root. It uses the `github-pages` environment and narrowly scoped deployment permissions. It does not enable Pages or prove a reachable public page. No activation, dispatch, deployment, or verified default URL is included in this work. A future operator-approved release must verify the actual HTTPS URL and v1 protocol before setting a default; do not overwrite the v1 path with a new protocol. Self-hosting is optional, not a requirement imposed on every installer. Without a trusted page, use `hermes mail-notifier setup --ui-language en` with hidden terminal input; existing checks and non-secret management continue.
+
 ```sh
+# First prepare the pinned parser/SDK prerequisites in Development and Verification.
 python -m pip install -e '.[dev]'
 python -m unittest discover -s tests
 python -m ruff check .
@@ -222,8 +251,10 @@ The `mail_notifier_check` and `mail_notifier_status` tools are also available in
 Paths are relative to the current profile's `HERMES_HOME`:
 
 - General settings: `plugins.entries.hermes-mail-notifier.settings.configuration` in `config.yaml` (accounts and destination saved as a single snapshot)
+- Trusted input page: `plugins.entries.hermes-mail-notifier.settings.credential_page_url` in `config.yaml` (operator-only; empty by default)
 - App passwords: `HERMES_MAIL_<ACCOUNT_ID>_APP_PASSWORD` in Hermes credential storage
 - UID checkpoints, pending notifications, and processing history: `plugin-data/hermes-mail-notifier/data.db`
+- Non-secret onboarding drafts/recovery evidence: `plugin-data/hermes-mail-notifier/setup.db` (schema v2; pending passwords/transport private keys/ciphertexts are not stored here)
 - Cron entry point: `scripts/hermes-mail-notifier.py`
 
 Full raw emails and attachments are not stored. Up to 12,000 normalized body characters are cached until classification; after seven days the cache expires and the body can be fetched again. Reasons, evidence, summaries, and completed history are retained for 30 days. Unfinished notifications are retained for retries. Default status output excludes mail bodies and summaries. Settings, passwords, and the database live outside the installed plugin code.
@@ -259,21 +290,39 @@ Automated tests use fake email, model, and delivery services. Use the server-sid
 
 ## Development and Verification
 
-The default tests require no external services, credentials, or additional packages.
+Install the declared runtime and development dependencies first. The compatibility suite also uses the pinned Hermes cron parser and Telegram SDK: prepare a sibling `../hermes` checkout at the revision above, with its Telegram extra. On Python 3.11, install the two parser-import dependencies explicitly because that host's core dependencies are guarded for Python 3.14+. This does not certify the full host on 3.11. Default tests need no live services or credentials; host-only tests are intentionally skipped unless `HERMES_CONTRACT=1`. Node **24** is development/CI-only and uses the same dependency-equipped Python for real Web Crypto interoperability.
 
 ```sh
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q __init__.py mail_notifier tests
+python -m pip install -e '.[dev]'
+python -m pip install -e '../hermes[telegram]'
+# Python 3.11 parser prerequisites only:
+python -m pip install 'ruamel.yaml==0.18.16' 'python-dotenv==1.2.2'
+python -m unittest discover -s tests -v
+python -m compileall -q __init__.py mail_notifier tests
+python -m ruff check .
+python -m pyright
+PYTHON=python node --test tests/web/*.test.mjs
+python -m tests.load_scenario --output load-report.json
 ```
 
-In a Python environment with Hermes installed, you can also verify the real host integration contracts. These tests use temporary profiles and do not connect to external email, model, or Telegram services.
+For the host gate, install Hermes revision `d5aa9d7adf308ca466a118206c201254cf3ca977` **with its Telegram extra** in the same Python 3.14 environment, then install this plugin and dev dependencies. CI requires actual host/SDK imports before running the entire suite with `HERMES_CONTRACT=1`, and fails on **any skip**, not just test failures. These tests use temporary synthetic profiles and remote-service doubles; they are not live admission/delivery tests.
 
 ```sh
-hermes plugins doctor . --ci
-HERMES_CONTRACT=1 python -m unittest tests.test_hermes_contract -v
+python -c 'import cryptography, telegram; from hermes_cli.plugins import PluginContext, PluginManager; from gateway.run import GatewayRunner; from plugins.platforms.telegram.adapter import TelegramAdapter'
+HERMES_CONTRACT=1 python -m unittest discover -s tests -v
+HERMES_CONTRACT=1 python -m unittest tests.test_hermes_contract tests.test_telegram_contract -v
 ```
 
-CI runs the default tests and syntax checks on Ubuntu with Python 3.11 and 3.14.
+CI installs dependencies → runs unittest → compileall → ruff/pyright on Python 3.11/3.14, then Node 24 web/interop tests; separate jobs retain pinned-host, interruption recovery, and 50-account/10,000-event load checks. Workflow/configuration tests do **not** establish HTTPS reachability or device safety.
+
+For an offline no-inbound Docker check (a daemon and build-time internet are required):
+
+```sh
+docker build -f tests/container/Dockerfile -t mail-onboarding-smoke .
+python tests/container/run.py
+```
+
+The allowlisted build context excludes `.env`, databases, `.venv`, `.git`, and local agent/planning/runtime records. Dependencies and the pinned host/Telegram extra are installed into the image before execution. The runner creates one UUID-named temporary volume, mounts **only that profile volume** into two distinct `--rm --network none` write/resume containers, publishes **no ports**, and removes only its own volume. External Telegram/IMAP/model operations are fake and reported as such. No daemon/build/run means the smoke is unperformed, not supported-by-assumption. Successful offline smoke still leaves public HTTPS, recorded client versions, fresh/existing live profiles, remote/container deployment, Naver/Daum/Gmail login, synthetic model diagnosis, Telegram receipt and later new-mail notifications in both languages as separate, operator-approved release gates. Do not run live commands against an actual profile without that approval.
 
 ## License
 

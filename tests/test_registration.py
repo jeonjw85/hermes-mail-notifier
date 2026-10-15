@@ -39,6 +39,22 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(ctx.register_telegram_handler.call_count, 1)
         self.assertTrue(ctx.on_unload.called)
 
+    def test_manifest_tools_match_exactly_and_no_model_tool_can_set_hosting_url(self):
+        module = self.load_plugin()
+        ctx = Mock()
+        module.register(ctx)
+        manifest = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text()
+        tools = {call.kwargs["name"]: call.kwargs for call in ctx.register_tool.call_args_list}
+        section = manifest.split("provides_tools:\n", 1)[1].split("config_schema:", 1)[0]
+        self.assertEqual({line.strip()[2:] for line in section.splitlines() if line.strip()}, set(tools))
+        for tool in tools.values():
+            self.assertNotIn("credential_page_url", json.dumps(tool["schema"]))
+        result = json.loads(tools["mail_notifier_policy"]["handler"]({"changes": {"credential_page_url": "https://untrusted.example/"}}))
+        self.assertFalse(result["success"])
+        result = json.loads(tools["mail_notifier_setup"]["handler"]({"credential_page_url": "https://untrusted.example/"}))
+        self.assertEqual(result["error"], "invalid_tool_arguments")
+        ctx.set_config.assert_not_called()
+
     def test_setup_rejects_all_arguments_and_without_origin_only_guides_to_mail(self):
         module = self.load_plugin()
         ctx = Mock()

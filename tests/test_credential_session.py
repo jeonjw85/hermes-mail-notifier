@@ -336,7 +336,9 @@ class CredentialSessionTests(unittest.TestCase):
                                          provider="naver", account_label="개인 메일 & work", ui_language="ko")
         parsed = urlsplit(url)
         self.assertEqual(parsed.query, "theme=dark")
-        self.assertEqual(parse_qs(parsed.fragment), {
+        fragment = parse_qs(parsed.fragment)
+        self.assertEqual(set(fragment), {"mn"})
+        self.assertEqual(parse_qs(fragment["mn"][0]), {
             "v": ["1"], "session_id": [challenge.session_id], "expires_at": ["1600"],
             "provider": ["naver"], "account_label": ["개인 메일 & work"], "ui_language": ["ko"],
             "server_public_key": [challenge.server_public_key], "binding": [challenge.binding]})

@@ -205,6 +205,55 @@ MESSAGES["ko"].update({
 })
 
 
+# Static Mini App mirrors only this subset; real interop tests check equality.
+MESSAGES["ko"].update({
+    "credential.title": "메일 앱 비밀번호 입력",
+    "credential.intro": "계정과 서비스를 확인한 뒤 앱 비밀번호를 입력하세요. 일반 로그인 비밀번호를 사용하지 마세요.",
+    "credential.account": "계정",
+    "credential.provider": "서비스",
+    "credential.expires": "입력 버튼 만료 시각",
+    "credential.password": "앱 비밀번호",
+    "credential.password_help": "공백을 그대로 유지합니다. 1–1024 UTF-8 바이트이며 줄바꿈·제어문자는 사용할 수 없습니다.",
+    "credential.language": "표시 언어 / Language",
+    "credential.submit": "암호화하여 제출",
+    "credential.cancel": "취소",
+    "credential.privacy": "비밀번호는 이 페이지에서 암호화되어 Telegram을 통해 봇으로 전달됩니다. 페이지 운영자와 기기를 신뢰할 때만 입력하세요. 연결 결과는 봇에서 확인하세요.",
+    "credential.ready": "이 화면은 연결 성공을 확인하지 않습니다. 제출 후 봇의 안내를 확인하세요.",
+    "credential.encrypting": "암호화 중…",
+    "credential.submitted": "Telegram에 전달을 요청했습니다. 아직 연결이 확인되지 않았습니다. 봇에서 결과를 확인하세요. 응답이 없으면 새 입력 버튼을 요청하세요.",
+    "credential.unavailable": "지원되는 Telegram 클라이언트에서 봇의 보안 입력 키보드 버튼을 다시 여세요. 사용할 수 없으면 CLI에서 hermes mail-notifier setup을 실행하세요.",
+    "credential.invalid_challenge": "입력 버튼 정보가 올바르지 않거나 지원되지 않는 버전입니다. 봇에서 새 입력 버튼을 요청하세요.",
+    "credential.expired": "입력 버튼이 만료되었습니다. 봇에서 새 입력 버튼을 요청하세요.",
+    "credential.invalid_password": "앱 비밀번호를 다시 입력하세요. 1–1024 UTF-8 바이트이며 줄바꿈·제어문자는 사용할 수 없습니다.",
+    "credential.encryption_failed": "암호화할 수 없어 제출하지 않았습니다. 지원되는 Telegram 클라이언트에서 새 버튼을 열거나 CLI에서 hermes mail-notifier setup을 실행하세요.",
+    "credential.send_failed": "전달 여부를 확인할 수 없습니다. 재전송하지 말고 봇에서 결과를 확인한 뒤 필요하면 새 입력 버튼을 요청하세요.",
+    "credential.cancelled": "입력을 취소했습니다. 다시 입력하려면 봇에서 새 버튼을 요청하세요.",
+})
+MESSAGES["en"].update({
+    "credential.title": "Enter mail app password",
+    "credential.intro": "Check the account and service, then enter an app password. Do not use your normal login password.",
+    "credential.account": "Account",
+    "credential.provider": "Service",
+    "credential.expires": "Input button expires",
+    "credential.password": "App password",
+    "credential.password_help": "Spaces are preserved. Use 1–1024 UTF-8 bytes, with no newlines or control characters.",
+    "credential.language": "Language / 표시 언어",
+    "credential.submit": "Encrypt and submit",
+    "credential.cancel": "Cancel",
+    "credential.privacy": "This page encrypts the password for the bot via Telegram. Only enter it if you trust the page operator and your device. Check the connection result in the bot.",
+    "credential.ready": "This screen does not confirm a connection. Check the bot after submitting.",
+    "credential.encrypting": "Encrypting…",
+    "credential.submitted": "Asked Telegram to deliver your submission. The connection is not confirmed yet. Check the result in the bot. If there is no response, request a new input button.",
+    "credential.unavailable": "Reopen the bot’s secure input keyboard button in a supported Telegram client. If unavailable, run hermes mail-notifier setup in the CLI.",
+    "credential.invalid_challenge": "This input button is malformed or uses an unsupported version. Request a new input button from the bot.",
+    "credential.expired": "This input button has expired. Request a new input button from the bot.",
+    "credential.invalid_password": "Reenter the app password: 1–1024 UTF-8 bytes, with no newlines or control characters.",
+    "credential.encryption_failed": "Encryption failed; nothing was submitted. Open a new button in a supported Telegram client or run hermes mail-notifier setup in the CLI.",
+    "credential.send_failed": "Delivery is uncertain. Do not resend here. Check the bot, then request a new input button if needed.",
+    "credential.cancelled": "Input cancelled. Request a new button from the bot to start again.",
+})
+
+
 def resolve_ui_language(*, explicit: str = "", saved: str = "", detected: str = "") -> str:
     """Resolve the first selected locale; unsupported or missing locales use English."""
     selected = explicit or saved or detected

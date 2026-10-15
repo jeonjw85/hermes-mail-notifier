@@ -20,9 +20,11 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Install plugin and development dependencies
         run: python -m pip install -e '.[dev]'
+      - name: Mini App and real Web Crypto interoperability tests
+        run: node --test tests/web/*.test.mjs
       - name: Unit and integration tests
         run: python -m unittest discover -s tests -v
       - name: Syntax check
@@ -49,13 +51,16 @@ jobs:
           python-version: '3.14'
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Install pinned Hermes with Telegram and plugin dependencies
         run: |
           python -m pip install -e './hermes[telegram]' -e './plugin[dev]'
           python -m pip check
       - name: Require actual host imports
         run: python -c 'import cryptography, telegram; from hermes_cli.plugins import PluginContext, PluginManager; from plugins.plugin_storage import plugin_db'
+      - name: Mini App and real Web Crypto interoperability tests
+        working-directory: plugin
+        run: node --test tests/web/*.test.mjs
       - name: Host contract suite (no host skips)
         working-directory: plugin
         env:

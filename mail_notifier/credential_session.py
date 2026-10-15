@@ -239,7 +239,8 @@ def credential_url(base_url: str, challenge: CredentialChallenge, *, provider: s
         fragment = urlencode({"v": "1", "session_id": challenge.session_id, "expires_at": challenge.expires_at,
                               "provider": provider, "account_label": account_label, "ui_language": ui_language,
                               "server_public_key": challenge.server_public_key, "binding": challenge.binding})
-        return urlunsplit(parsed._replace(fragment=fragment))
+        # Keep plugin context isolated from Telegram's appended launch fields.
+        return urlunsplit(parsed._replace(fragment=urlencode({"mn": fragment})))
     except (ValueError, TypeError):
         pass
     raise HostError("invalid_credential_url")

@@ -99,7 +99,9 @@ class DistributionConfigTests(unittest.TestCase):
         self.assertIn("tests.test_recovery", block(jobs, "load-recovery"))
         self.assertIn("tests.load_scenario", block(jobs, "load-recovery"))
         container = block(jobs, "container")
+        self.assertIn("python tests/container/check_context.py", container)
         self.assertIn("docker build -f tests/container/Dockerfile -t mail-onboarding-smoke .", container)
+        self.assertLess(container.index("check_context.py"), container.index("docker build"))
         self.assertIn("python tests/container/run.py", container)
 
     def test_host_gate_exits_nonzero_on_any_skip_or_failure(self):
@@ -118,19 +120,14 @@ class DistributionConfigTests(unittest.TestCase):
                                             capture_output=True, text=True, timeout=15)
                     self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
 
-    def test_docker_context_is_allowlisted_and_image_has_no_broad_copy_or_runtime_install(self):
+    def test_docker_image_has_no_broad_copy_or_exposed_ports(self):
         path = ROOT / ".dockerignore"
         self.assertTrue(path.is_file(), "Sensitive local files must not enter the build context")
-        rules = [line for line in path.read_text().splitlines() if line and not line.startswith("#")]
-        self.assertEqual(rules[0], "**")
-        allowed = {line[1:] for line in rules[1:] if line.startswith("!")}
-        self.assertEqual(allowed, {"pyproject.toml", "README.md", "LICENSE", "__init__.py", "plugin.yaml",
-                                   "mail_notifier/", "mail_notifier/*.py", "tests/", "tests/*.py",
-                                   "tests/container/", "tests/container/*.py", "tests/container/Dockerfile",
-                                   "web/", "web/credentials/", "web/credentials/v1/",
-                                   "web/credentials/v1/*.html", "web/credentials/v1/*.mjs", "web/credentials/v1/*.css"})
+        # Filtering is exercised by check_context.py against Docker itself in
+        # the container job; do not substitute rule equality or a local matcher.
         dockerfile = (ROOT / "tests/container/Dockerfile").read_text()
         self.assertNotRegex(dockerfile, r"(?m)^COPY\s+(?:\.\s|\[\s*\"\.\")")
+        self.assertNotRegex(dockerfile, r"(?m)^COPY\s+(?:mail_notifier|tests|web)/\s")
         self.assertNotRegex(dockerfile, r"(?mi)^EXPOSE\s")
         self.assertIn("[telegram]", dockerfile)
         self.assertIn("d5aa9d7adf308ca466a118206c201254cf3ca977", dockerfile)

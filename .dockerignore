@@ -5,16 +5,18 @@
 !LICENSE
 !__init__.py
 !plugin.yaml
-!mail_notifier/
+# Reopen files, not directory trees. Deny descendants of extension-shaped
+# directories too: Docker patterns match parents as well as the file itself.
 !mail_notifier/*.py
-!tests/
+mail_notifier/*/*
 !tests/*.py
-!tests/container/
+tests/*/*
 !tests/container/*.py
 !tests/container/Dockerfile
-!web/
-!web/credentials/
-!web/credentials/v1/
-!web/credentials/v1/*.html
-!web/credentials/v1/*.mjs
-!web/credentials/v1/*.css
+tests/container/*/*
+!web/credentials/v1/index.html
+!web/credentials/v1/app.mjs
+!web/credentials/v1/crypto.mjs
+!web/credentials/v1/messages.mjs
+!web/credentials/v1/styles.css
+web/credentials/v1/*/*

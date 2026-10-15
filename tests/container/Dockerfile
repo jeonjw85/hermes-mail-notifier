@@ -11,9 +11,10 @@ RUN mkdir /opt/hermes && tar -xzf /opt/hermes.tar.gz -C /opt/hermes --strip-comp
 
 WORKDIR /opt/plugin
 COPY pyproject.toml README.md LICENSE __init__.py plugin.yaml ./
-COPY mail_notifier/ ./mail_notifier/
-COPY tests/ ./tests/
-COPY web/ ./web/
+COPY mail_notifier/*.py ./mail_notifier/
+COPY tests/*.py ./tests/
+COPY tests/container/*.py ./tests/container/
+COPY web/credentials/v1/index.html web/credentials/v1/app.mjs web/credentials/v1/crypto.mjs web/credentials/v1/messages.mjs web/credentials/v1/styles.css ./web/credentials/v1/
 RUN python -m pip install --no-cache-dir -e '.[dev]' \
     && python -m pip check \
     && python -c 'import cryptography, telegram; from gateway.run import GatewayRunner; from plugins.platforms.telegram.adapter import TelegramAdapter'

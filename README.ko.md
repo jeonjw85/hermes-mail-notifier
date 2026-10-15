@@ -318,11 +318,14 @@ CI는 Python 3.11·3.14에서 의존성 설치 → unittest → compileall → r
 인바운드를 열지 않는 오프라인 Docker 검사 (daemon과 빌드 시 인터넷 필요):
 
 ```sh
+python tests/container/check_context.py
 docker build -f tests/container/Dockerfile -t mail-onboarding-smoke .
 python tests/container/run.py
 ```
 
 allowlist 빌드 context는 `.env`·DB·`.venv`·`.git`·로컬 에이전트/계획/런타임 기록을 제외합니다. 네트워크 차단 실행 전에 의존성·고정 호스트·Telegram extra를 이미지에 설치합니다. runner는 UUID 이름의 임시 볼륨 하나를 만들고 서로 다른 write/resume 컨테이너에 **해당 프로필 볼륨만** mount합니다. 두 실행 모두 `--rm --network none`이며 **공개 포트가 없고** 자신이 만든 볼륨만 정리합니다. 외부 Telegram·IMAP·모델 동작은 대역이며 출력에도 표시합니다. daemon·빌드·실행이 불가능하면 미수행이지 지원 완료가 아닙니다. 오프라인 smoke가 성공해도 공개 HTTPS·실제 클라이언트 버전·새/기존 실제 프로필·원격/컨테이너 배포·네이버/다음/Gmail 로그인·합성 모델 진단·Telegram 수신·이후 새 메일 알림의 한영 확인은 별도 운영자 승인 출시 게이트로 남습니다. 승인 없이 실제 프로필에서 live 명령을 실행하지 마세요.
+
+`check_context.py`는 무해한 임시 필수/금지 파일, scratch 빌드와 로컬 출력을 사용해 Docker의 실제 필터를 검사합니다. 이미지를 pull하거나 컨테이너를 실행하지 않으며 CI에서도 이미지 빌드 전에 이 동작 검사를 수행합니다.
 
 ## 라이선스
 

@@ -318,11 +318,14 @@ CI installs dependencies → runs unittest → compileall → ruff/pyright on Py
 For an offline no-inbound Docker check (a daemon and build-time internet are required):
 
 ```sh
+python tests/container/check_context.py
 docker build -f tests/container/Dockerfile -t mail-onboarding-smoke .
 python tests/container/run.py
 ```
 
 The allowlisted build context excludes `.env`, databases, `.venv`, `.git`, and local agent/planning/runtime records. Dependencies and the pinned host/Telegram extra are installed into the image before execution. The runner creates one UUID-named temporary volume, mounts **only that profile volume** into two distinct `--rm --network none` write/resume containers, publishes **no ports**, and removes only its own volume. External Telegram/IMAP/model operations are fake and reported as such. No daemon/build/run means the smoke is unperformed, not supported-by-assumption. Successful offline smoke still leaves public HTTPS, recorded client versions, fresh/existing live profiles, remote/container deployment, Naver/Daum/Gmail login, synthetic model diagnosis, Telegram receipt and later new-mail notifications in both languages as separate, operator-approved release gates. Do not run live commands against an actual profile without that approval.
+
+`check_context.py` exercises Docker's actual filter with inert temporary required/forbidden files, a scratch build and local output; it pulls no image and starts no container. This behavioral check also runs before the image build in CI.
 
 ## License
 

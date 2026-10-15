@@ -91,7 +91,8 @@ def _account(account, language):
     return " · ".join((bounded(account.label, 55), bounded(account.username, 75), state))
 
 
-def panel(draft, settings, *, language: str, page: int = 0, resume_confirmation=False, status=None, current_fingerprint=None) -> dict:
+def panel(draft, settings, *, language: str, page: int = 0, change_page: int = 0, resume_confirmation=False,
+          status=None, current_fingerprint=None, footer="") -> dict:
     language = resolve_ui_language(explicit=language)
     view = {"text": "Mail Notifier\n", "buttons": [], "input_field": None, "language": language}
     if draft is None:
@@ -106,11 +107,34 @@ def panel(draft, settings, *, language: str, page: int = 0, resume_confirmation=
         add("settings_menu" if key == "settings" else key, "menu", menu=key)
     def pages():
         if page:
-            add("previous_page", "page", page=page - 1)
+            add("previous_page", "page", page=page - 1, change_page=change_page)
         if (page + 1) * 5 < len(candidate.accounts):
-            add("next_page", "page", page=page + 1)
+            add("next_page", "page", page=page + 1, change_page=change_page)
+    def changes(*, original=None, tail=""):
+        rows = _changes(draft, language, original=original)
+        heading = "\n" + text("telegram.changes", language) + "\n"
+        # Reserve the exact surrounding text and evidence, plus an upper bound
+        # on page-counter digits. Only individual values are abbreviated; never
+        # clip whole field comparisons to fit a panel.
+        counter = text("telegram.change_page", language, page=len(rows), pages=len(rows)) + "\n"
+        budget = min(1400, 3500 - len((view["text"] + heading + counter + tail + footer).encode("utf-16-le")) // 2)
+        groups, used = [[]], 0
+        for row in rows:
+            size = len(row.encode("utf-16-le")) // 2
+            if groups[-1] and used + 1 + size > budget:
+                groups.append([])
+                used = 0
+            used += size + bool(groups[-1])
+            groups[-1].append(row)
+        selected = max(0, min(change_page, len(groups) - 1))
+        view["text"] += (heading + text("telegram.change_page", language, page=selected + 1, pages=len(groups))
+                         + "\n" + "\n".join(groups[selected]) + tail)
+        if selected:
+            add("previous_changes", "changes_page", page=selected - 1, account_page=page)
+        if selected + 1 < len(groups):
+            add("next_changes", "changes_page", page=selected + 1, account_page=page)
     def finish():
-        view["text"] = bounded(view["text"], 3500)
+        view["text"] = bounded(view["text"], 3500 - len(footer.encode("utf-16-le")) // 2) + footer
         return view
     state = draft.state
     if state in {"completed", "cancelled", "expired", "acknowledged"}:
@@ -125,8 +149,8 @@ def panel(draft, settings, *, language: str, page: int = 0, resume_confirmation=
     if state == "needs_review":
         view["text"] += text("setup.review_external", language) + "\n"
         view["text"] += text("telegram.current", language) + "\n" + _settings(settings, language, page)
-        view["text"] += "\n" + text("setup.preview", language) + "\n" + _changes(draft, language, original=settings)
-        view["text"] += "\n" + text("telegram.steps", language, steps=", ".join(sorted(draft.steps)))
+        view["text"] += "\n" + text("setup.preview", language)
+        changes(original=settings, tail="\n" + text("telegram.steps", language, steps=", ".join(sorted(draft.steps))))
         add("acknowledge", "acknowledge", current_fingerprint=current_fingerprint or settings_fingerprint(settings))
         pages()
         return finish()
@@ -152,11 +176,12 @@ def panel(draft, settings, *, language: str, page: int = 0, resume_confirmation=
         return finish()
     if state == "awaiting_confirmation":
         view["text"] += text("setup.preview", language) + "\n" + _settings(candidate, language, page)
-        view["text"] += "\n" + _changes(draft, language)
+        tail = ""
         if draft.form.get("action") == "resume":
-            view["text"] += "\n" + text("setup.resume", language)
+            tail += "\n" + text("setup.resume", language)
         if draft.steps.get("error_code"):
-            view["text"] += "\n" + text("telegram.error", language, code=draft.steps["error_code"])
+            tail += "\n" + text("telegram.error", language, code=draft.steps["error_code"])
+        changes(tail=tail)
         add("confirm_resume" if draft.form.get("action") == "resume" else "confirm",
             "confirm_resume" if draft.form.get("action") == "resume" else "confirm")
         add("back", "back")
@@ -261,7 +286,7 @@ def _settings(settings, language, page=0):
 
 def _changes(draft, language, *, original=None):
     base = draft.original if original is None else original
-    lines = [text("telegram.changes", language)]
+    lines = []
     for name in ("target", "schedule", "ui_language", "language", *EDIT_SETTINGS):
         before, after = getattr(base, name), getattr(draft.candidate, name)
         if before != after:
@@ -270,7 +295,6 @@ def _changes(draft, language, *, original=None):
     for account in draft.candidate.accounts:
         old = accounts.get(account.id)
         if old and old != account:
-            lines.append(_account(account, language))
             for name in ("label", "username", "mailbox", "enabled"):
                 if getattr(old, name) != getattr(account, name):
                     label = text("telegram.account_state" if name == "enabled" else "setup." + name, language)
@@ -278,7 +302,7 @@ def _changes(draft, language, *, original=None):
                     if name == "enabled":
                         before = text("status.enabled" if before else "status.disabled", language)
                         after = text("status.enabled" if after else "status.disabled", language)
-                    lines.append(label + ": " + _value(before) + " → " + _value(after))
+                    lines.append(_account(account, language) + "\n" + label + ": " + _value(before) + " → " + _value(after))
         elif not old:
             lines.append(text("telegram.new_connection", language) + " " + _account(account, language)
                          + " · " + text("telegram." + account.provider, language) + " · " + bounded(account.mailbox))
@@ -287,4 +311,4 @@ def _changes(draft, language, *, original=None):
     if original is None and draft.steps.get("credentials"):
         lines.append(text("telegram.credentials_preview", language))
     lines.append(text("setup.retention", language))
-    return bounded("\n".join(lines), 1400)
+    return lines

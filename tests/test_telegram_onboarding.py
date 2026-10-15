@@ -217,6 +217,52 @@ class TelegramOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("every 10m", preview["text"])
         self.assertIn("fr", preview["text"])
 
+    async def test_back_before_password_then_schedule_restores_pending_account_binding(self):
+        view = await self.press(await self.send("start"), "Gmail")
+        secret, _ = await self.address(view)
+        root = await self.press(secret, "Back")
+        schedule = await self.press(root, "Check schedule")
+        secret = await self.press(schedule, "Every 10 minutes")
+        self.assertEqual(secret["state"], "awaiting_secret")
+        self.assertIn("me@example.com", secret["text"])
+        preview, _ = await self.password(secret)
+        self.assertEqual(preview["state"], "awaiting_confirmation")
+        self.assertEqual(self.host.settings.accounts, ())
+        await self.press(preview, "Start with these settings")
+        self.assertEqual(len(self.host.settings.accounts), 1)
+        self.assertEqual(self.host.settings.schedule, "every 10m")
+
+    async def test_back_before_password_then_review_restores_pending_account_binding(self):
+        view = await self.press(await self.send("start"), "Gmail")
+        secret, _ = await self.address(view)
+        root = await self.press(secret, "Back")
+        secret = await self.press(root, "Review pending changes")
+        self.assertEqual(secret["state"], "awaiting_secret")
+        self.assertIn("me@example.com", secret["text"])
+        preview, _ = await self.password(secret)
+        self.assertEqual(preview["state"], "awaiting_confirmation")
+        await self.press(preview, "Start with these settings")
+        self.assertEqual(self.host.settings.accounts[0].username, "me@example.com")
+
+    async def test_back_after_password_then_expired_confirmation_restores_account_binding(self):
+        view = await self.press(await self.send("start"), "Gmail")
+        secret, _ = await self.address(view)
+        preview, _ = await self.password(secret)
+        root = await self.press(preview, "Back")
+        schedule = await self.press(root, "Check schedule")
+        preview = await self.press(schedule, "Every 10 minutes")
+        self.assertEqual(preview["state"], "awaiting_confirmation")
+        resource = self.module.views._shared().runtime.profiles[self.owner.profile_home].resource
+        now = resource.service.clock()
+        resource.service.clock = lambda: now + 601
+        secret = await self.press(preview, "Start with these settings")
+        self.assertEqual(secret["state"], "needs_secret")
+        self.assertIn("me@example.com", secret["text"])
+        self.assertEqual(self.host.events, [])
+        preview, _ = await self.password(secret)
+        await self.press(preview, "Start with these settings")
+        self.assertEqual(self.host.settings.accounts[0].username, "me@example.com")
+
     async def test_unload_retains_only_nonsecret_waiting_guard_for_inactive_transport(self):
         from mail_notifier.onboarding_auth import AdmissionBroker
         guard = {}

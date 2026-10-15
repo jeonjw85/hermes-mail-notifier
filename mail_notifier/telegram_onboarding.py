@@ -122,7 +122,7 @@ class TelegramOnboarding:
         with closing(resource.host.open_setup_store()) as store:
             return store.get(draft_id, owner)
 
-    def _view(self, resource, draft, *, page=0, resume_confirmation=False):
+    def _view(self, resource, draft, *, page=0, change_page=0, resume_confirmation=False):
         preview = resource.service.preview(draft.id, draft.owner)
         if preview["revision"] != draft.revision:
             draft = self._read(resource, draft.id, draft.owner)
@@ -130,14 +130,15 @@ class TelegramOnboarding:
         if preview.get("current_settings_fingerprint") and preview["current_settings_fingerprint"] != settings_fingerprint(settings):
             raise HostError("setup_changed_retry")
         status = get_status(resource.host) if draft.form.get("action") == "recovery" else None
-        result = views.panel(draft, settings, language=draft.candidate.ui_language, page=page,
-                             resume_confirmation=resume_confirmation, status=status,
+        footer = ""
+        if draft.state in {"committing", "scheduled", "repair_required", "needs_review", "completed"}:
+            footer = "\n" + text("telegram.evidence", draft.candidate.ui_language,
+                                 saved=text("telegram.yes" if "settings" in preview["completed_steps"] else "telegram.no", draft.candidate.ui_language),
+                                 steps=", ".join(preview["completed_steps"]), next=preview.get("next_action", "/mail"))
+        result = views.panel(draft, settings, language=draft.candidate.ui_language, page=page, change_page=change_page,
+                             resume_confirmation=resume_confirmation, status=status, footer=footer,
                              current_fingerprint=preview.get("current_settings_fingerprint"))
         result["completed_steps"] = preview["completed_steps"]
-        if draft.state in {"committing", "scheduled", "repair_required", "needs_review", "completed"}:
-            result["text"] += "\n" + text("telegram.evidence", draft.candidate.ui_language,
-                                           saved=text("telegram.yes" if "settings" in preview["completed_steps"] else "telegram.no", draft.candidate.ui_language),
-                                           steps=", ".join(preview["completed_steps"]), next=preview.get("next_action", "/mail"))
         result["text"] = views.bounded(result["text"], 3500)
         with _shared().lock:
             key = owner_key(draft.owner)
@@ -203,7 +204,9 @@ class TelegramOnboarding:
                 raise HostError("setup_changed_retry")
             operation, values = action["action"], action["values"]
             if operation == "page":
-                return self._view(resource, draft, page=values["page"])
+                return self._view(resource, draft, page=values["page"], change_page=values.get("change_page", 0))
+            if operation == "changes_page":
+                return self._view(resource, draft, page=values["account_page"], change_page=values["page"])
             if operation == "provider" and draft.form.get("action") == "connection_provider":
                 draft = service.change(draft.id, owner, draft.revision, action="edit",
                                        values={"account_id": draft.form["account_id"], "provider": values["provider"]})

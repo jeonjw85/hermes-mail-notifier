@@ -349,6 +349,114 @@ class TelegramManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("candidate criteria", conflict["text"])
         self.assertLessEqual(len(conflict["text"].encode("utf-16-le")) // 2, 3500)
 
+    async def pending_policy_preview(self, count=1, language="en"):
+        fields = ("important_senders", "ignored_senders", "always_notify_senders", "important_keywords")
+        old = {field: (f"OLD-{field}-" + "x" * 150 + "@example.com",) for field in fields}
+        new = {field: (f"NEW-{field}-" + "y" * 150 + "@example.org",) for field in fields}
+        old["importance_instructions"] = "OLD-INSTRUCTION-MARKER"
+        new["importance_instructions"] = "NEW-INSTRUCTION-MARKER"
+        self.seed(count, **old)
+        self.host.settings = replace(self.host.settings, ui_language=language)
+        root = await self.send("start")
+        for index, (field, value) in enumerate(new.items()):
+            policy = await self.act(root, "menu", menu="policy")
+            prompt = await self.act(policy, "input", field=field)
+            preview = await self.edit_text(prompt, value if isinstance(value, str) else value[0])
+            if index < len(new) - 1:
+                root = await self.act(preview, "back")
+        return preview, old, new
+
+    async def change_pages(self, view):
+        pages = [view]
+        for page in range(1, 100):
+            next_buttons = [(b, record) for b, record in self.actions(view, "changes_page") if record["values"]["page"] == page]
+            if not next_buttons:
+                return pages
+            self.assertEqual(len(next_buttons), 1)
+            view = await self.send("callback", next_buttons[0][0]["callback_data"])
+            self.assertNotIn("error", view)
+            pages.append(view)
+        self.fail("change pagination did not terminate")
+
+    async def test_all_pending_policy_changes_remain_reviewable_across_change_pages(self):
+        preview, old, new = await self.pending_policy_preview()
+        pages = await self.change_pages(preview)
+        self.assertGreater(len(pages), 1, "long comparison must expose further change pages")
+        combined = "\n".join(page["text"] for page in pages)
+        for field in new:
+            self.assertIn("OLD-" + field if field != "importance_instructions" else old[field], combined)
+            self.assertIn("NEW-" + field if field != "importance_instructions" else new[field], combined)
+        for page in pages:
+            self.assertLessEqual(len(page["text"].encode("utf-16-le")) // 2, 3500)
+            self.assertIn("long values abbreviated", page["text"])
+        self.assertEqual(self.host.settings.importance_instructions, "OLD-INSTRUCTION-MARKER")
+        self.assertEqual(self.host.events, [])
+        await self.act(pages[-1], "confirm")
+        for field, value in new.items():
+            self.assertEqual(getattr(self.host.settings, field), value)
+
+    async def test_conflict_comparison_keeps_all_current_and_candidate_changes_reachable(self):
+        preview, _, new = await self.pending_policy_preview()
+        external = {field: (f"EXTERNAL-{field}-" + "z" * 150 + "@external.example",) for field in new if field != "importance_instructions"}
+        external["importance_instructions"] = "EXTERNAL-INSTRUCTION-MARKER"
+        self.host.settings = replace(self.host.settings, **external)
+        conflict = await self.act(preview, "confirm")
+        self.assertEqual(conflict["state"], "needs_review")
+        pages = await self.change_pages(conflict)
+        self.assertGreater(len(pages), 1)
+        combined = "\n".join(page["text"] for page in pages)
+        for field in new:
+            self.assertIn("EXTERNAL-" + field if field != "importance_instructions" else external[field], combined)
+            self.assertIn("NEW-" + field if field != "importance_instructions" else new[field], combined)
+        for page in pages:
+            self.assertLessEqual(len(page["text"].encode("utf-16-le")) // 2, 3500)
+        self.assertEqual(self.host.settings.importance_instructions, "EXTERNAL-INSTRUCTION-MARKER")
+        self.assertEqual(self.host.events, [])
+
+    async def test_change_page_tokens_bind_owner_revision_and_selected_account_page(self):
+        preview, _, _ = await self.pending_policy_preview(count=6)
+        preview = await self.act(preview, "page", page=1)
+        self.assertIn("me5@example.com", preview["text"])
+        buttons = self.actions(preview, "changes_page")
+        self.assertTrue(buttons, "change pages must be separate from account pages")
+        token = next(b["callback_data"] for b, record in buttons if record["values"]["page"] == 1)
+        self.assertRegex(token, r"^mn:[A-Za-z0-9_-]{32}$")
+        foreign = replace(self.receipt, owner=replace(self.owner, user_id="222", chat_id="222"), message_id="777")
+        denied = await self.controller.handle(foreign, NativeInput("callback", "700", "222", "222", "9", "777", "777", "en", token))
+        self.assertEqual(denied["error"], "setup_changed_retry")
+        second = await self.send("callback", token)
+        self.assertEqual(second["revision"], preview["revision"])
+        self.assertIn("me5@example.com", second["text"])
+        first_accounts = await self.act(second, "page", page=0)
+        self.assertIn("me0@example.com", first_accounts["text"])
+        self.assertIn("NEW-INSTRUCTION-MARKER", first_accounts["text"])
+        second = first_accounts
+        back_token = self.actions(second, "changes_page")[0][0]["callback_data"]
+        await self.act(second, "back")
+        stale = await self.send("callback", back_token)
+        self.assertEqual(stale["error"], "setup_changed_retry")
+        self.assertEqual(self.host.events, [])
+
+    async def test_korean_conflict_with_fifty_long_accounts_keeps_every_comparison_row(self):
+        preview, _, _ = await self.pending_policy_preview(count=50, language="ko")
+        self.host.settings = replace(self.host.settings, accounts=tuple(
+            replace(account, label=f"EXTERNAL-ALIAS-{index}-" + "🙂" * 200)
+            for index, account in enumerate(self.host.settings.accounts)))
+        conflict = await self.act(preview, "confirm")
+        self.assertEqual(conflict["state"], "needs_review")
+        pages = await self.change_pages(conflict)
+        self.assertGreater(len(pages), 5)
+        combined = "\n".join(page["text"] for page in pages)
+        for index in range(50):
+            self.assertIn(f"EXTERNAL-ALIAS-{index}-", combined)
+        self.assertIn("OLD-INSTRUCTION-MARKER", combined)
+        self.assertIn("NEW-INSTRUCTION-MARKER", combined)
+        for page in pages:
+            self.assertLessEqual(len(page["text"].encode("utf-16-le")) // 2, 3500)
+            self.assertIn("표시만 요약", page["text"])
+            self.assertIn("설정 발행 여부: 아니요", page["text"])
+        self.assertEqual(self.host.events, [])
+
     async def test_sdk_plain_text_explicitly_disables_parse_and_link_previews(self):
         self.seed()
         from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo

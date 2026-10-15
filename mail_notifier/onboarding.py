@@ -239,7 +239,9 @@ class OnboardingService:
         else:
             raise HostError("invalid_setup_action")
         changed = self._save(draft, candidate=candidate, steps=steps, form=form, state="draft")
-        return self._save(changed, state="awaiting_confirmation" if self._ready(changed) else "awaiting_secret")
+        if not self._ready(changed):
+            return self._save(changed, state="awaiting_secret", form={**changed.form, "account_id": self._missing_account(changed)})
+        return self._save(changed, state="awaiting_confirmation")
 
     def validate_password(self, draft_id: str, owner: SetupOwner, revision: int, password: str) -> SetupDraft:
         with self._state_lock:
@@ -376,7 +378,7 @@ class OnboardingService:
         if draft.state in _TERMINAL or draft.state == "needs_review":
             raise HostError("setup_changed_retry")
         if not self._ready(draft):
-            return self._result(self._save(draft, state="needs_secret"))
+            return self._result(self._save(draft, state="needs_secret", form={**draft.form, "account_id": self._missing_account(draft)}))
         if draft.state != "awaiting_confirmation":
             raise HostError("setup_confirmation_required")
         if self.host.load_settings() != draft.original:
@@ -456,7 +458,7 @@ class OnboardingService:
                 if self._settings_conflict(draft, actual):
                     return self._result(self._save(draft, state="needs_review"))
                 if not published and not self._ready(draft):
-                    return self._result(self._save(draft, state="needs_secret"))
+                    return self._result(self._save(draft, state="needs_secret", form={**draft.form, "account_id": self._missing_account(draft)}))
                 if not recovering:
                     draft = self._save(draft, state="committing")
                 try:
@@ -467,12 +469,12 @@ class OnboardingService:
                             continue
                         secret = self._secret(draft, account)
                         if secret is None:
-                            return self._result(self._save(draft, state="needs_secret"))
+                            return self._result(self._save(draft, state="needs_secret", form={**draft.form, "account_id": account.id}))
                         marker["write_started"] = True
                         draft = self._save(draft, steps=steps)
                         secret = self._secret(draft, account)
                         if secret is None:
-                            return self._result(self._save(draft, state="needs_secret"))
+                            return self._result(self._save(draft, state="needs_secret", form={**draft.form, "account_id": account.id}))
                         self._check_active()
                         self.host.save_password(account, secret.password)
                         if self.host.get_password(account) != secret.password:

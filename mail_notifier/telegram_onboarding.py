@@ -75,7 +75,6 @@ class TelegramOnboarding:
         self._tasks = set()
         self._task_homes = {}
         self._loop = None
-        self._handlers = []
 
     @property
     def broker(self):
@@ -135,11 +134,15 @@ class TelegramOnboarding:
         with _shared().lock:
             key = owner_key(draft.owner)
             views._ui()["languages"][key] = {"owner": key, "language": draft.candidate.ui_language, "expires": time.time() + 86400}
-            waiting = views._ui()["waiting"]
-            if draft.state in {"awaiting_secret", "needs_secret", "validating"}:
-                waiting[key] = {"owner": key, "expires": time.time() + 86400}
-            else:
-                waiting.pop(key, None)
+            waiting_maps = [views._ui()["waiting"]]
+            transport = views._ui()["transports"].get(draft.owner.bot_id)
+            if transport is not None:
+                waiting_maps.append(transport["waiting"])
+            for waiting in waiting_maps:
+                if draft.state in {"awaiting_secret", "needs_secret", "validating"}:
+                    waiting[key] = {"owner": key, "expires": time.time() + 86400}
+                else:
+                    waiting.pop(key, None)
         return result
 
     async def handle(self, receipt, item):
@@ -361,88 +364,8 @@ class TelegramOnboarding:
                 [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])] for b in bound["buttons"]])})
 
     def telegram_factory(self, native, adapter) -> None:
-        from telegram import Update, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo
-        from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, MessageHandler, TypeHandler, filters
-        sdk = ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo
-        controller = self
-        class PluginInput(filters.MessageFilter):
-            def filter(self, message):
-                web = message.web_app_data
-                if web is not None:
-                    marker = bool(re.search(r'"kind"\s*:\s*"mail_notifier_credential"', web.data[:4096]))
-                    if len(web.data.encode()) > 4096:
-                        return marker
-                    try:
-                        return json.loads(web.data).get("kind") == "mail_notifier_credential"
-                    except (ValueError, AttributeError, TypeError):
-                        return marker
-                reply = message.reply_to_message
-                if (reply is not None and reply.from_user is not None and reply.from_user.is_bot
-                        and str(reply.from_user.id) == str(native.bot.id) and (reply.text or "").startswith("Mail Notifier\n")):
-                    return True
-                if message.text and not message.text.startswith("/") and message.from_user and message.chat.type == "private":
-                    identity = (str(native.bot.id), str(message.from_user.id), str(message.chat.id), str(message.message_thread_id or ""))
-                    with _shared().lock:
-                        return any(key[2:] == identity and time.time() < record["expires"]
-                                   for key, record in views._ui()["waiting"].items())
-                return False
-
-        async def observe(update, context):
-            if controller._closed:
-                return
-            controller._loop = asyncio.get_running_loop()
-            observe_native(controller.broker, update, context.bot)
-            with _shared().lock:
-                views._ui()["transports"][str(context.bot.id)] = {"controller": controller, "bot": context.bot, "loop": controller._loop, "sdk": sdk}
-
-        async def receive(update, context):
-            if controller._closed:
-                return
-            query, message = update.callback_query, update.effective_message
-            if query is not None:
-                await query.answer()
-            if message is None:
-                raise ApplicationHandlerStop
-            if update.effective_chat.type != "private":
-                await context.bot.send_message(chat_id=message.chat_id, message_thread_id=message.message_thread_id,
-                                               text=text("telegram.group", resolve_ui_language(detected=getattr(update.effective_user, "language_code", ""))))
-                raise ApplicationHandlerStop
-            if query:
-                kind, value = "callback", query.data
-            elif message.web_app_data:
-                kind, value = "web_app", message.web_app_data.data
-            elif (message.text or "").split(" ", 1)[0].split("@", 1)[0] == "/mail":
-                kind, value = "start", ""
-            else:
-                reply = message.reply_to_message
-                # Waiting-secret text is dropped BEFORE escrow, not merely hidden
-                # from the returned JSON. Replies bind to a non-secret prompt ID.
-                with _shared().lock:
-                    identity = (str(context.bot.id), str(update.effective_user.id), str(message.chat_id), str(message.message_thread_id or ""))
-                    waiting = any(key[2:] == identity and time.time() < record["expires"] for key, record in views._ui()["waiting"].items())
-                if waiting:
-                    kind, value = "password_text", ""
-                else:
-                    kind, value = "reply", json.dumps({"prompt_message_id": str(reply.message_id) if reply else "", "text": message.text or ""})
-            item = native_input(update, context.bot, kind=kind, value=value)
-            if item is not None:
-                async def admitted():
-                    try:
-                        result = await admit_native(adapter, controller.broker, item)
-                        if result is not None and not controller._closed:
-                            await controller._display(result[0], result[1], context.bot, sdk)
-                        elif not controller._closed:
-                            await context.bot.send_message(chat_id=item.chat_id, text=text("telegram.retry", resolve_ui_language(detected=item.language_code)))
-                    except (HostError, ValueError):
-                        return
-                controller._spawn(admitted())
-            raise ApplicationHandlerStop
-
-        for handler, group in ((TypeHandler(Update, observe), -1), (CommandHandler("mail", receive), 0),
-                               (CallbackQueryHandler(receive, pattern=r"^mn:[A-Za-z0-9_-]+$"), 0),
-                               (MessageHandler(PluginInput() & ~filters.COMMAND, receive), 0)):
-            native.add_handler(handler, group=group)
-            self._handlers.append((native, handler, group))
+        from hermes_cli.plugins import get_plugin_manager
+        _install_intake(native, adapter, get_plugin_manager(), self.ctx.manifest.name)
 
     def unload(self):
         if self._closed:
@@ -454,9 +377,6 @@ class TelegramOnboarding:
             self._broker.close()
             revoked = self.runtime.revoke_profile(home)
             views.clear_profile(home)
-        for native, handler, group in self._handlers:
-            native.remove_handler(handler, group=group)
-        self._handlers.clear()
         with _shared().lock:
             for bot_id, record in list(views._ui()["transports"].items()):
                 if record["controller"] is self:
@@ -471,3 +391,108 @@ class TelegramOnboarding:
                 asyncio.create_task(self.runtime.close_profile(home, profile=revoked), name="mail-notifier-unload")
         if self._loop is not None and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(cancel)
+
+
+def _install_intake(native, adapter, manager, plugin_name):
+    """Client-lifetime guard: host rewire deduplicates factories across reloads.
+
+    Capture no registration, broker or profile resource. Resolve the live bound
+    factory through the public host registry on each update; an inactive plugin
+    still consumes its stale prompts/credentials but can start no work.
+    """
+    from telegram import Update, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo
+    from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, MessageHandler, TypeHandler, filters
+    # Only this client's expiring identity markers survive profile unload. They
+    # contain no authority, keys, input content or registration/module objects.
+    waiting = {}
+    sdk = ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo
+
+    def is_waiting(identity):
+        with _shared().lock:
+            for owner, record in list(waiting.items()):
+                if time.time() >= record["expires"]:
+                    del waiting[owner]
+            return any(owner[2:] == identity for owner in waiting)
+
+    def current():
+        for factory, name in manager.get_platform_handler_factories("telegram"):
+            if name == plugin_name and getattr(factory, "__name__", "") == "telegram_factory":
+                controller = getattr(factory, "__self__", None)
+                if controller is not None and not controller._closed:
+                    return controller
+        return None
+
+    class PluginInput(filters.MessageFilter):
+        def filter(self, message):
+            web = message.web_app_data
+            if web is not None:
+                marker = bool(re.search(r'"kind"\s*:\s*"mail_notifier_credential"', web.data[:4096]))
+                if len(web.data.encode()) > 4096:
+                    return marker
+                try:
+                    return json.loads(web.data).get("kind") == "mail_notifier_credential"
+                except (ValueError, AttributeError, TypeError):
+                    return marker
+            reply = message.reply_to_message
+            if (reply is not None and reply.from_user is not None and reply.from_user.is_bot
+                    and str(reply.from_user.id) == str(native.bot.id) and (reply.text or "").startswith("Mail Notifier\n")):
+                return True
+            if message.text and not message.text.startswith("/") and message.from_user and message.chat.type == "private":
+                identity = (str(native.bot.id), str(message.from_user.id), str(message.chat.id), str(message.message_thread_id or ""))
+                return is_waiting(identity)
+            return False
+
+    async def observe(update, context):
+        controller = current()
+        if controller is None:
+            return
+        controller._loop = asyncio.get_running_loop()
+        observe_native(controller.broker, update, context.bot)
+        with _shared().lock:
+            views._ui()["transports"][str(context.bot.id)] = {"controller": controller, "bot": context.bot, "loop": controller._loop, "sdk": sdk,
+                                                             "waiting": waiting}
+
+    async def receive(update, context):
+        query, message = update.callback_query, update.effective_message
+        if query is not None:
+            await query.answer()
+        # Resolve AFTER the answer await: unload may have revoked that generation.
+        controller = current()
+        if controller is None or message is None:
+            raise ApplicationHandlerStop
+        if update.effective_chat.type != "private":
+            await context.bot.send_message(chat_id=message.chat_id, message_thread_id=message.message_thread_id,
+                                           text=text("telegram.group", resolve_ui_language(detected=getattr(update.effective_user, "language_code", ""))))
+            raise ApplicationHandlerStop
+        if query:
+            kind, value = "callback", query.data
+        elif message.web_app_data:
+            kind, value = "web_app", message.web_app_data.data
+        elif (message.text or "").split(" ", 1)[0].split("@", 1)[0] == "/mail":
+            kind, value = "start", ""
+        else:
+            reply = message.reply_to_message
+            # Retained non-secret markers also discard text during a reload gap.
+            identity = (str(context.bot.id), str(update.effective_user.id), str(message.chat_id), str(message.message_thread_id or ""))
+            if is_waiting(identity):
+                kind, value = "password_text", ""
+            else:
+                kind, value = "reply", json.dumps({"prompt_message_id": str(reply.message_id) if reply else "", "text": message.text or ""})
+        item = native_input(update, context.bot, kind=kind, value=value)
+        if item is not None:
+            async def admitted():
+                try:
+                    result = await admit_native(adapter, controller.broker, item)
+                    if result is not None and not controller._closed:
+                        await controller._display(result[0], result[1], context.bot, sdk)
+                    elif not controller._closed:
+                        await context.bot.send_message(chat_id=item.chat_id, text=text("telegram.retry", resolve_ui_language(detected=item.language_code)))
+                except (HostError, ValueError):
+                    return
+            controller._spawn(admitted())
+        raise ApplicationHandlerStop
+
+    for handler, group in ((TypeHandler(Update, observe), -1), (CommandHandler("mail", receive), 0),
+                           (CallbackQueryHandler(receive, pattern=r"^mn:[A-Za-z0-9_-]+$"), 0),
+                           (MessageHandler(PluginInput() & ~filters.COMMAND, receive), 0)):
+        native.add_handler(handler, group=group)

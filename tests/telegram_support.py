@@ -253,6 +253,32 @@ class GatewayHarness:
         token, message = self.button(label)
         return await self.dispatch_native(callback=token, reply=message, **kwargs)
 
+    def reload_profile(self, name="default", *, rewire=True):
+        """Real loader replacement; public rewire keeps the exact native client."""
+        from gateway.run import _profile_runtime_scope
+        profile = self.profiles[name]
+        home = self.home if name == "default" else self.beta_home
+        manifest = profile.controller.ctx.manifest
+        with _profile_runtime_scope(home):
+            profile.manager.unload()
+            profile.manager._load_plugin(manifest)
+            loaded = profile.manager._plugins[manifest.name]
+            if loaded.error:
+                raise AssertionError(loaded.error)
+            controller = next(cb.__self__ for cb in profile.manager._hooks["post_gateway_admission"])
+            broker = controller.broker
+            # Match initial fixture setup: shorten only the native caller's wait
+            # for denial, never the host authorizer or receipt creation policy.
+            original_wait = broker.wait
+            async def short_wait(reference, *, timeout=30):
+                return await original_wait(reference, timeout=min(timeout, .1))
+            self.patch(broker, "wait", short_wait)
+            self.profiles[name] = SimpleNamespace(manager=profile.manager, controller=controller,
+                                                 broker=broker, module=profile.module)
+            if rewire:
+                self.adapter.rewire_plugin_handlers()
+        return controller
+
     def fake_mail_services(self):
         """Only replace the external service boundaries, not admission or config."""
         from tests.test_service import FakeMailbox

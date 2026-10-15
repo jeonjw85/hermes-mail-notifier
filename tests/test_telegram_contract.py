@@ -422,33 +422,118 @@ class TelegramAdmissionContractTests(unittest.IsolatedAsyncioTestCase):
         self.harness.button("Connect another account")
 
     async def test_public_reload_survives_old_async_cleanup_and_repeated_unload(self):
-        from gateway.run import _profile_runtime_scope
-        from telegram.ext import Application
         profile = self.harness.profiles["default"]
         await self.harness.dispatch_native()
         old = profile.controller
-        manifest = profile.manager._plugins["hermes-mail-notifier"].manifest
-        profile.manager.unload()
-        profile.manager._load_plugin(manifest)
-        loaded = profile.manager._plugins["hermes-mail-notifier"]
-        self.assertFalse(loaded.error)
-        controller = next(cb.__self__ for cb in profile.manager._hooks["post_gateway_admission"])
-        # The pinned host de-duplicates factory qualnames per live native client.
-        # A supported reconnect/rebuild supplies a new client; do not reset or
-        # patch its private wired-factory cache to force hot-reload behavior.
-        self.harness.application = Application.builder().bot(self.harness.bot).updater(None).build()
-        self.harness.application._initialized = True
-        with _profile_runtime_scope(self.harness.home):
-            broker = controller.broker
-            self.harness.adapter._wire_plugin_handlers(self.harness.application)
-        self.harness.profiles["default"] = SimpleNamespace(manager=profile.manager, controller=controller,
-                                                           broker=broker, module=profile.module)
+        application = self.harness.application
+        controller = self.harness.reload_profile()
+        self.assertIs(self.harness.application, application)
+        self.assertIsNot(controller, old)
         old.unload()
         await asyncio.sleep(0)
         self.harness.native_sent.clear()
         await self.harness.dispatch_native()
         self.assertTrue(any(kwargs.get("reply_markup") for _, kwargs in self.harness.native_sent))
         self.assertNotIn("setup_work_cancelled", repr(self.harness.native_sent))
+
+    async def test_same_client_unloaded_guard_blocks_stale_passwords_before_and_after_handoff(self):
+        from telegram import ForceReply
+        from telegram.ext import CallbackQueryHandler, MessageHandler, filters
+        payload = await self.connected_preview(route=None, thread_id=None, submit=False)
+        prompt = next(message for message, kwargs in reversed(self.harness.native_sent)
+                      if isinstance(kwargs.get("reply_markup"), ForceReply))
+        token, panel_message = self.harness.button("Cancel")
+        self.harness.application.add_handler(MessageHandler(filters.TEXT, self.harness.adapter._handle_text_message))
+        forwarded = []
+        async def other(update, context):
+            forwarded.append(update)
+        self.harness.application.add_handler(CallbackQueryHandler(other))
+        self.harness.application.add_handler(MessageHandler(filters.ALL, other))
+        self.harness.profiles["default"].manager.unload()
+        for phase in ("inactive", "reloaded"):
+            if phase == "reloaded":
+                self.harness.reload_profile()
+            for reply in (prompt, None):
+                marker = "test-only-password-" + phase + ("-reply" if reply else "-plain")
+                await self.harness.dispatch_native(text=marker, reply=reply)
+                captured = repr(self.harness.model_inputs) + repr(self.harness.events) + repr(self.harness.native_sent)
+                self.assertNotIn(marker, captured)
+            await self.harness.dispatch_native(callback=token, reply=panel_message)
+            await self.harness.dispatch_native(web_app=payload)
+            self.assertFalse(forwarded)
+        self.assertEqual(self.harness.model_inputs, [])
+        self.assertEqual(self.harness.mail_passwords, {})
+
+    async def test_same_client_handoff_restores_current_callbacks_and_other_plugin_passthrough(self):
+        from telegram.ext import CallbackQueryHandler, MessageHandler, filters
+        await self.harness.dispatch_native()
+        old = self.harness.profiles["default"].controller
+        controller = self.harness.reload_profile()
+        await asyncio.sleep(0)
+        self.harness.native_sent.clear()
+        with self.assertLogs("gateway.run", "WARNING"):
+            await self.harness.dispatch_native(user_id="222")
+        self.assertFalse(any(kwargs.get("reply_markup") for _, kwargs in self.harness.native_sent))
+        self.harness.native_sent.clear()
+        await self.harness.dispatch_native()
+        self.assertTrue(self.harness.native_sent, "same-client /mail must reach the new registration")
+        await self.harness.press("Gmail")
+        self.assertIn("login email address", self.harness.native_sent[-2][1]["text"])
+        self.assertFalse(old._tasks)
+        self.assertIsNot(controller, old)
+        captured = []
+        async def other(update, context):
+            captured.append(update)
+        self.harness.application.add_handler(CallbackQueryHandler(other))
+        self.harness.application.add_handler(MessageHandler(filters.ALL, other))
+        for kwargs in ({"text": "/help"}, {"callback": "other_plugin:yes"}, {"web_app": '{"kind":"other_plugin"}'}):
+            await self.harness.dispatch_native(**kwargs)
+        self.assertEqual(len(captured), 3)
+
+    async def test_same_client_reloaded_stale_password_never_reaches_agent(self):
+        from telegram import ForceReply
+        from telegram.ext import MessageHandler, filters
+        await self.connected_preview(route=None, thread_id=None, submit=False)
+        prompt = next(message for message, kwargs in reversed(self.harness.native_sent)
+                      if isinstance(kwargs.get("reply_markup"), ForceReply))
+        self.harness.application.add_handler(MessageHandler(filters.TEXT, self.harness.adapter._handle_text_message))
+        self.harness.reload_profile()
+        await self.harness.dispatch_native(text="test-only-password-after-rewire", reply=prompt)
+        self.assertFalse(self.harness.model_inputs, "stale credential reply must never start an agent turn")
+
+    async def test_same_client_reload_disposes_credentials_but_not_other_profile(self):
+        payload = await self.connected_preview(route=None, thread_id=None)
+        default = self.harness.profiles["default"]
+        state = self.harness.auth._shared()
+        resource = state.runtime.profiles[str(self.harness.home)].resource
+        self.assertTrue(resource.sessions._sessions)
+        self.assertTrue(resource.service._secrets)
+        await self.connected_preview()
+        beta = state.runtime.profiles[str(self.harness.beta_home)].resource
+        beta_keys = dict(beta.sessions._sessions)
+        beta_secrets = dict(beta.service._secrets)
+        controller = self.harness.reload_profile()
+        self.assertFalse(resource.sessions._sessions)
+        self.assertFalse(resource.service._secrets)
+        self.assertFalse(resource.challenges)
+        self.assertNotIn(default.broker._lease, state.leases)
+        self.assertEqual(beta.sessions._sessions, beta_keys)
+        self.assertEqual(beta.service._secrets, beta_secrets)
+        await asyncio.sleep(0)
+        await self.harness.dispatch_native()
+        self.assertIn(str(self.harness.home), state.runtime.profiles,
+                      "same-client intake must initialize the replacement runtime")
+        replacement = state.runtime.profiles[str(self.harness.home)].resource
+        self.assertIsNot(replacement, resource)
+        self.assertIsNotNone(replacement, "new registration must create a fresh runtime resource")
+        self.assertFalse(replacement.sessions._sessions)
+        self.assertFalse(replacement.service._secrets)
+        self.assertFalse(default.controller._tasks)
+        self.assertIsNot(controller, default.controller)
+        probes = len(self.harness.imap_probes)
+        await self.harness.dispatch_native(web_app=payload)
+        self.assertEqual(len(self.harness.imap_probes), probes, "old credential keys must not survive handoff")
+        self.assertEqual(self.harness.mail_passwords, {})
 
 
 if __name__ == "__main__":

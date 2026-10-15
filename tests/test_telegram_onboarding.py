@@ -15,7 +15,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from mail_notifier.config import Settings
-from mail_notifier.onboarding_auth import AdmissionReceipt, NativeInput, SetupOwner
+from mail_notifier.onboarding_auth import AdmissionReceipt, NativeInput, SetupOwner, owner_key
 from tests.support import feature
 from tests.test_cli import SetupHost
 from tests.test_credential_session import compact, encrypt
@@ -216,3 +216,19 @@ class TelegramOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("telegram:222:3", preview["text"])
         self.assertIn("every 10m", preview["text"])
         self.assertIn("fr", preview["text"])
+
+    async def test_unload_retains_only_nonsecret_waiting_guard_for_inactive_transport(self):
+        from mail_notifier.onboarding_auth import AdmissionBroker
+        guard = {}
+        self.module.views._ui()["transports"][self.owner.bot_id] = {"controller": self.controller, "waiting": guard}
+        view = await self.press(await self.send("start"), "Gmail")
+        await self.address(view)
+        self.controller._broker = AdmissionBroker(self.owner.profile_home)
+        resource = self.module.views._shared().runtime.profiles[self.owner.profile_home].resource
+        self.controller.unload()
+        waiting = guard.get(owner_key(self.owner))
+        self.assertIsNotNone(waiting, "unload must preserve the secret-text interception marker")
+        self.assertEqual(set(waiting), {"owner", "expires"})
+        self.assertNotIn(owner_key(self.owner), self.module.views._ui()["waiting"])
+        self.assertFalse(resource.service._secrets)
+        self.assertFalse(resource.sessions._sessions)

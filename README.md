@@ -86,6 +86,12 @@ Only **mail arriving after an account is first connected** is checked; existing 
 
 Re-running setup preserves an existing cron job's paused state. Disabling all accounts also pauses the cron job. After enabling an account again, resume the job with `hermes cron resume JOB_ID`, as shown below.
 
+### Languages
+
+The existing `language` setting controls model summaries and the fixed labels, fallback reasons, setup confirmation and diagnostic test notifications. Choose `ko` or `en` in `setup`, or use `hermes mail-notifier policy set --language en`. Other existing summary-language values remain supported: the model receives the value unchanged, while fixed messages fall back to English. Already prepared notifications keep their saved text and destination.
+
+The separate `ui_language` setting in the configuration snapshot accepts `ko`, `en`, or `""` (automatic). It currently selects diagnostic guidance without changing `language`; without a saved selection or detected UI context, guidance falls back to English. The shared locale resolver supports explicit selection, then saved UI language, then a detected regional locale such as `ko-KR` or `en_US.UTF-8`, then English. This does not yet provide a bilingual terminal wizard or Telegram setup interface.
+
 ## Operations and Corrections
 
 ```sh
@@ -131,7 +137,7 @@ Sender rules accept exact addresses such as `boss@example.com` or exact domains 
 
 Default criteria prioritize meaningful work and personal correspondence, deadlines, schedule/contract changes, payment failures, and significant account security changes. Promotions, newsletters, and routine receipts are suppressed by default. Automated reservation cancellations can still need attention. For example, add `Prioritize interview schedule changes and contract deadlines` as an additional criterion.
 
-Notifications include the account, sender, subject, reason, priority, summary, action, deadline, and stable mail ID. Categories are work, personal, transactional, promotion, newsletter, and unknown; decisions are notify, suppress, and review. Missing actions/deadlines show `명시 없음` ("Not specified"). Incomplete bodies show `본문 확인 필요` ("Check the email body"); an attempted suppression of an incomplete message becomes a review notification.
+Notifications include the account, sender, subject, reason, priority, summary, action, deadline, and stable mail ID. Categories are work, personal, transactional, promotion, newsletter, and unknown; decisions are notify, suppress, and review. Missing actions/deadlines show `Not specified` in English or `명시 없음` in Korean. Incomplete bodies show `Check the email body` or `본문 확인 필요`; an attempted suppression of an incomplete message becomes a review notification. Machine-readable codes, tool fields and CLI commands are not translated.
 
 ## Commands
 

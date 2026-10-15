@@ -9,6 +9,7 @@ from dataclasses import replace
 
 from .config import Account, ConfigError, Settings, secret_name
 from .hermes_host import HostError
+from .i18n import text
 from .imap_client import ImapMailbox, MailboxError
 from .policy import POLICY_VERSION
 from .service import error_code
@@ -194,7 +195,7 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
                 job_id = host.install_schedule(settings, store)
                 stage = "설정 저장·cron 등록 완료, Telegram 확인"
                 if any(account.enabled for account in accounts):
-                    host.send(settings.target, "메일 알림 설정 완료. 연결 시점 이후의 중요한 새 메일을 요약해 알려드립니다.")
+                    host.send(settings.target, text("setup.notification", settings.language))
         finally:
             store.close()
         print(f"설정 완료 · cron: {job_id or '없음 (활성 계정 없음)'}")

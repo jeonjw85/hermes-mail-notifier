@@ -161,6 +161,35 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.host.model_calls, 1)
         self.assertEqual(self.boxes["a1"].fetches, 1)
 
+    def test_new_notification_uses_summary_language_independently_of_ui(self):
+        self.host.settings = replace(self.host.settings, language="en", ui_language="ko")
+        self.boxes["a1"].add()
+        self.assertEqual(self.run_check().sent, 1)
+        text = self.host.deliveries[0][1]
+        self.assertIn("Priority: Normal", text)
+        self.assertIn("Summary: 계약 회신 요청", text)
+        self.assertIn("Mail ID:", text)
+
+    def test_ready_notification_and_destination_survive_both_language_changes(self):
+        self.boxes["a1"].add()
+        self.host.send_error = True
+        self.run_check()
+        store = self.host.open_store()
+        try:
+            ready = store.due("a1", self.now + 300, 1, status="ready")[0]
+            saved, identifier = ready.notification, ready.mail_id
+        finally:
+            store.close()
+        self.host.settings = replace(self.host.settings, language="en", ui_language="en", target="telegram:999")
+        self.host.send_error = False
+        self.now += 300
+        self.assertEqual(self.run_check().sent, 1)
+        self.assertEqual(self.host.deliveries, [("telegram:111", saved)])
+        self.assertIn("우선순위: 보통", saved)
+        self.assertIn(identifier, saved)
+        self.assertEqual(self.host.model_calls, 1)
+        self.assertEqual(self.boxes["a1"].fetches, 1)
+
     def test_delivery_error_remains_visible_during_backoff_until_success(self):
         self.boxes["a1"].add()
         self.host.send_error = True
@@ -320,6 +349,20 @@ class ServiceTests(unittest.TestCase):
             self.now += 3600
         self.assertEqual(self.boxes["a1"].fetches, 1)
         self.assertIn("원문 확인", self.host.deliveries[0][1])
+
+    def test_five_invalid_outputs_produce_english_review_reason_and_empty_subject_fallback(self):
+        self.host.settings = replace(self.host.settings, language="en", ui_language="ko")
+        self.boxes["a1"].add(subject="")
+        self.host.classification = {"invalid": True}
+        for attempt in range(5):
+            self.assertEqual(self.run_check().sent, 1 if attempt == 4 else 0)
+            self.now += 3600
+        self.assertEqual(self.host.model_calls, 5)
+        self.assertEqual(self.boxes["a1"].fetches, 1)
+        text = self.host.deliveries[0][1]
+        self.assertIn("Reason: Model output failed validation 5 times. Check the original email.", text)
+        self.assertIn("Summary: Check the email body", text)
+        self.assertIn("[Review email ·", text)
 
     def test_delivery_tenth_failure_holds(self):
         self.boxes["a1"].add()

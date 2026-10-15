@@ -72,6 +72,14 @@ class SetupRecoveryTests(unittest.TestCase):
         self.assertEqual(self.host.settings.max_fetches, 3)
         self.assertFalse(any("Telegram 목적지" in prompt for prompt in self.prompts))
 
+    def test_setup_confirmation_uses_summary_language_and_preserves_ui_selection(self):
+        self.host.settings = replace(self.host.settings, language="en", ui_language="ko")
+        self.assertEqual(self.run_setup(["gmail", "One", "one@example.com", "INBOX"], account_action="add"), 0)
+        self.assertEqual(self.host.settings.language, "en")
+        self.assertEqual(self.host.settings.ui_language, "ko")
+        self.assertEqual(self.host.deliveries[0][1],
+                         "Mail notifications are configured. Important new emails arriving after connection will be summarized.")
+
     def test_accounts_cli_lists_disables_and_enables_without_reset(self):
         self.assertEqual(self.run_setup(["gmail", "One", "one@example.com", "INBOX"], account_action="add"), 0)
         account = self.host.settings.accounts[0]

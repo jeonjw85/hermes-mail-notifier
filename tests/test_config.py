@@ -13,6 +13,24 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.schedule, "every 5m")
         self.assertEqual(settings.target, "telegram")
         self.assertEqual(settings.language, "ko")
+        self.assertEqual(settings.ui_language, "")
+
+    def test_ui_selection_does_not_replace_existing_summary_language(self):
+        settings = self.config.load_settings({"language": "fr", "ui_language": "en"})
+        self.assertEqual(settings.language, "fr")
+        self.assertEqual(settings.ui_language, "en")
+        self.assertEqual(settings.schema_version, 2)
+        self.assertEqual(self.config.load_settings(self.config.dump_settings(settings)), settings)
+
+    def test_only_supported_explicit_ui_languages_are_persisted(self):
+        for language in ("", "ko", "en"):
+            with self.subTest(language=language):
+                settings = self.config.load_settings({"ui_language": language})
+                self.assertEqual(self.config.dump_settings(settings)["ui_language"], language)
+                self.assertEqual(settings.language, "ko")
+        for language in ("fr", "ko-KR", "en_US", "EN", None, False, [], "ko\n"):
+            with self.subTest(language=language), self.assertRaises(self.config.ConfigError):
+                self.config.load_settings({"ui_language": language})
 
     def test_legacy_settings_load_as_v2_without_losing_accounts(self):
         raw = {"accounts": [account_data()], "target": "telegram:123",

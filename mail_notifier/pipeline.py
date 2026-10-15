@@ -4,6 +4,7 @@ import time
 from dataclasses import asdict
 
 from .config import settings_fingerprint
+from .i18n import text
 from .message import MailContent
 from .render import render_notification
 from .triage import TriageError, review_result, triage_message
@@ -46,8 +47,8 @@ def classify_one(store, item, account, settings, complete, now, *, target=None):
         store.retry(item.key, exc.code, now)
         if store.get_work(item.mail_id).invalid_attempts < 5:
             raise
-        result = review_result(mail, "AI 판단 응답을 5회 검증하지 못했습니다. 원문 확인이 필요합니다.")
-    notification = render_notification(account, mail, result, mail_id=item.mail_id) if result.important else None
+        result = review_result(mail, text("triage.invalid_attempts", settings.language), language=settings.language)
+    notification = render_notification(account, mail, result, mail_id=item.mail_id, language=settings.language) if result.important else None
     store.save_decision(item.key, asdict(result), notification=notification, target=target or settings.target,
                         fingerprint=settings_fingerprint(settings), now=now)
     return result

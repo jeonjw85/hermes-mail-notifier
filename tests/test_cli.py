@@ -3,11 +3,12 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 from dataclasses import replace
 from unittest.mock import patch
 
-from mail_notifier.config import Settings
+from mail_notifier.config import Settings, dump_settings, load_settings
+from mail_notifier.onboarding_store import SetupStore
 from mail_notifier.hermes_host import HostError
 from mail_notifier.imap_client import MailboxError
 from mail_notifier.message import MailContent
@@ -16,11 +17,36 @@ from tests.test_service import FakeHost, FakeMailbox
 
 
 class SetupHost(FakeHost):
+    @property
+    def settings(self):
+        return self._settings
+
+    @settings.setter
+    def settings(self, value):
+        self._settings = value
+        if (self.path / "settings.json").exists():
+            (self.path / "settings.json").write_text(json.dumps(dump_settings(value)))
+
     def __init__(self, path):
         super().__init__(path, [])
         self.passwords = {}
         self.schedule_calls = 0
         self.cron_failure = False
+        self.paused = False
+        self.events = []
+
+    def home(self):
+        return self.path.resolve()
+
+    def has_saved_settings(self):
+        return (self.path / "settings.json").exists() or self.settings != Settings()
+
+    def open_setup_store(self):
+        return SetupStore(self.path / "setup.db")
+
+    def load_settings(self):
+        path = self.path / "settings.json"
+        return load_settings(json.loads(path.read_text())) if path.exists() else self.settings
 
     def check_compatibility(self):
         pass
@@ -34,23 +60,43 @@ class SetupHost(FakeHost):
 
     def save_settings(self, settings):
         self.settings = settings
+        (self.path / "settings.json").write_text(json.dumps(dump_settings(settings)))
+        self.events.append("settings")
 
     def save_password(self, account, password):
         self.passwords[account.id] = password
+        self.events.append("password")
 
     def get_password(self, account):
         return self.passwords[account.id]
 
-    def install_schedule(self, settings, store):
+    def install_schedule(self, settings, store, *, disable_only=False):
         self.schedule_calls += 1
         if self.cron_failure:
             raise HostError("cron_operation_failed")
+        if not any(a.enabled for a in settings.accounts):
+            job_id = store.get_meta("cron_job_id") or ""
+            self.paused = bool(job_id)
+            store.set_meta("cron_paused", self.paused)
+            return job_id
+        if disable_only:
+            store.set_meta("cron_paused", self.paused)
+            return store.get_meta("cron_job_id") or ""
         store.set_meta("cron_job_id", "job1")
+        store.set_meta("cron_paused", self.paused)
+        self.events.append("cron")
         return "job1"
+
+    def resume_schedule(self, job_id, store):
+        self.paused = False
+        store.set_meta("cron_paused", False)
 
 
 class CliTests(unittest.TestCase):
     def setUp(self):
+        locale = patch.dict("os.environ", {"LC_ALL": "en_US.UTF-8"})
+        locale.start()
+        self.addCleanup(locale.stop)
         self.module = feature(self, "mail_notifier.cli")
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -77,13 +123,13 @@ class CliTests(unittest.TestCase):
             return self.module.setup_plugin(self.host, read=read, read_secret=lambda prompt: password)
 
     def first_setup(self):
-        self.assertEqual(self.setup_with(["add", "naver", "개인", "me@example.com", "INBOX", "done"]), 0)
+        self.assertEqual(self.setup_with(["naver", "me@example.com", "no", "no", "yes"]), 0)
         return self.host.settings.accounts[0]
 
     def test_setup_repeat_preserves_cursor_and_single_schedule_identity(self):
         account = self.first_setup()
         self.highest = 200
-        self.assertEqual(self.setup_with(["done"]), 0)
+        self.assertEqual(self.setup_with(["done", "no", "yes"]), 0)
         self.assertEqual(self.host.settings.accounts[0].id, account.id)
         store = self.host.open_store()
         try:
@@ -95,7 +141,7 @@ class CliTests(unittest.TestCase):
 
     def test_rename_and_password_rotation_preserve_account_id(self):
         account = self.first_setup()
-        self.assertEqual(self.setup_with(["edit", account.id, "", "업무", "", "", "done"], password="rotated-test-password"), 0)
+        self.assertEqual(self.setup_with(["edit", account.id, "", "", "업무", "", "done", "no", "yes"], password="rotated-test-password"), 0)
         changed = self.host.settings.accounts[0]
         self.assertEqual((changed.id, changed.label), (account.id, "업무"))
         self.assertEqual(self.host.passwords[account.id], "rotated-test-password")
@@ -103,7 +149,7 @@ class CliTests(unittest.TestCase):
     def test_login_change_disables_old_and_initializes_new_account(self):
         account = self.first_setup()
         self.highest = 300
-        self.assertEqual(self.setup_with(["edit", account.id, "gmail", "", "new@example.com", "", "done"]), 0)
+        self.assertEqual(self.setup_with(["edit", account.id, "gmail", "new@example.com", "", "", "done", "no", "yes"]), 0)
         old, new = self.host.settings.accounts
         self.assertFalse(old.enabled)
         self.assertNotEqual(new.id, account.id)
@@ -127,43 +173,112 @@ class CliTests(unittest.TestCase):
 
     def test_failed_probe_is_not_saved_or_enabled(self):
         self.probe_error = True
-        self.assertNotEqual(self.setup_with(["add", "gmail", "개인", "me@example.com", "INBOX"]), 0)
+        self.assertNotEqual(self.setup_with(["gmail", "me@example.com", "no"]), 0)
         self.assertEqual(self.host.settings, Settings())
         self.assertEqual(self.host.passwords, {})
         self.assertEqual(self.host.schedule_calls, 0)
 
     def test_disable_and_enable_preserve_baseline(self):
         account = self.first_setup()
-        self.assertEqual(self.setup_with(["disable", account.id, "done"]), 0)
+        self.assertEqual(self.setup_with(["disable", account.id, "done", "no", "yes"]), 0)
         self.assertFalse(self.host.settings.accounts[0].enabled)
         self.highest = 200
-        self.assertEqual(self.setup_with(["enable", account.id, "done"]), 0)
+        self.assertEqual(self.setup_with(["enable", account.id, "done", "no", "yes"]), 1)
         self.assertTrue(self.host.settings.accounts[0].enabled)
+        self.assertTrue(self.host.paused)
+        self.assertEqual(self.setup_with(["yes"]), 0)
+        self.assertFalse(self.host.paused)
         store = self.host.open_store()
         try:
             self.assertEqual(store.cursor(account.id), (7, 100))
         finally:
             store.close()
 
+    def test_accounts_cli_can_disable_again_after_enable_while_cron_is_paused(self):
+        account = self.first_setup()
+        parser = argparse.ArgumentParser()
+        self.module.configure_parser(parser)
+        with patch.object(self.module, "ImapMailbox", self.mailbox):
+            for action in ("disable", "enable", "disable"):
+                with redirect_stdout(io.StringIO()) as out:
+                    code = self.module.run_cli(parser.parse_args(["accounts", action, account.id, "--json"]), self.host)
+                self.assertEqual(code, 0, out.getvalue())
+                self.assertEqual(json.loads(out.getvalue())["enabled"], action == "enable")
+        self.assertFalse(self.host.load_settings().accounts[0].enabled)
+        self.assertTrue(self.host.paused)
+
+    def test_accounts_cli_disable_during_model_reload_and_delivery_outage_preserves_other_account(self):
+        from mail_notifier.config import Account, secret_name
+        account = self.first_setup()
+        other = Account("other", "Other", "gmail", "other@example.com", secret_name("other"))
+        self.host.settings = replace(self.host.settings, accounts=(account, other))
+        self.host.paused = True
+        parser = argparse.ArgumentParser()
+        self.module.configure_parser(parser)
+        deliveries, model_calls = len(self.host.deliveries), self.host.model_calls
+        with patch.object(self.host, "check_environment", side_effect=HostError("credentials_not_reloadable")), \
+                patch.object(self.host, "complete_structured", side_effect=HostError("model_unavailable")), \
+                patch.object(self.host, "send", side_effect=HostError("delivery_failed")), \
+                redirect_stdout(io.StringIO()) as out:
+            code = self.module.run_cli(parser.parse_args(["accounts", "disable", account.id, "--json"]), self.host)
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertFalse(self.host.settings.accounts[0].enabled)
+        self.assertEqual(self.host.settings.accounts[1], other)
+        self.assertTrue(self.host.paused)
+        self.assertEqual((len(self.host.deliveries), self.host.model_calls), (deliveries, model_calls))
+        with closing(self.host.open_store()) as store:
+            self.assertEqual(store.cursor(account.id), (7, 100))
+
+    def test_edit_disabled_account_replaces_password_without_enabling_notifications(self):
+        account = self.first_setup()
+        self.assertEqual(self.setup_with(["disable", account.id, "done", "no", "yes"]), 0)
+        self.assertEqual(self.setup_with(["edit", account.id, "", "", "", "", "done", "no", "yes"],
+                                        password="disabled-rotation"), 0)
+        self.assertEqual(self.host.passwords[account.id], "disabled-rotation")
+        self.assertFalse(self.host.load_settings().accounts[0].enabled)
+        self.assertTrue(self.host.paused)
+
     def test_cron_failure_reports_partial_setup_and_reexecution_recovers(self):
         self.host.cron_failure = True
-        self.assertNotEqual(self.setup_with(["add", "gmail", "개인", "me@example.com", "INBOX", "done"]), 0)
+        self.assertNotEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "yes"]), 0)
         self.assertEqual(len(self.host.settings.accounts), 1)
         account_id = self.host.settings.accounts[0].id
-        self.assertIn("설정 저장", self.output.getvalue())
+        self.assertIn("settings", self.output.getvalue())
         self.host.cron_failure = False
-        self.assertEqual(self.setup_with(["done"]), 0)
+        self.assertEqual(self.setup_with(["yes"]), 0)
         self.assertEqual(self.host.settings.accounts[0].id, account_id)
+
+    def test_cli_failed_delivery_handoff_allows_new_confirmed_destination_without_secret(self):
+        self.first_setup()
+        self.host.settings = replace(self.host.settings, target="telegram:-222:3")
+        self.host.paused = True
+        self.host.send_error = True
+        self.assertEqual(self.setup_with(["done", "no", "yes"]), 1)
+        with closing(self.host.open_setup_store()) as store:
+            old_id = store.db.execute("SELECT id FROM drafts WHERE state='repair_required'").fetchone()[0]
+        answers = ["no", "yes", "done", "yes", "telegram:444", "", "", "", "", "", "", "", "", "yes"]
+        self.host.send_error = False
+        with patch("mail_notifier.setup._password", side_effect=AssertionError("secret reentry")):
+            self.assertEqual(self.setup_with(answers), 1)  # Saved, deliberately still paused.
+        self.assertEqual(self.host.settings.target, "telegram:444")
+        self.assertTrue(self.host.paused)
+        with closing(self.host.open_setup_store()) as store:
+            row = store.db.execute("SELECT state, steps_json FROM drafts WHERE id=?", (old_id,)).fetchone()
+            self.assertEqual(row[0], "acknowledged")
+            steps = json.loads(row[1])
+            self.assertEqual(steps["acknowledgement"]["reason"], "unfinished_delivery")
+            self.assertEqual(steps["test_delivery"], {"started": True})
+        self.assertEqual(self.host.events.count("password"), 1)
 
     def test_failed_settings_publish_reports_the_correct_stage(self):
         with patch.object(self.host, "save_settings", side_effect=HostError("settings_save_failed")):
-            self.assertNotEqual(self.setup_with(["add", "gmail", "개인", "me@example.com", "INBOX", "done"]), 0)
-        self.assertIn("단계: 설정 저장 중", self.output.getvalue())
+            self.assertNotEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "yes"]), 0)
+        self.assertIn("settings_save_failed", self.output.getvalue())
         self.assertEqual(self.host.settings.accounts, ())
 
     def test_environment_only_credentials_fail_before_settings_or_schedule_changes(self):
         with patch.object(self.host, "check_environment", side_effect=HostError("credentials_not_reloadable")):
-            self.assertNotEqual(self.setup_with(["add", "gmail", "개인", "me@example.com", "INBOX", "done"]), 0)
+            self.assertNotEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "yes"]), 0)
         self.assertEqual(self.host.settings.accounts, ())
         self.assertEqual(self.host.passwords, {})
         self.assertEqual(self.host.schedule_calls, 0)
@@ -198,15 +313,15 @@ class CliTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as out:
             self.assertEqual(self.module.run_cli(argparse.Namespace(mail_command="status", json=False), self.host), 0)
         text = out.getvalue()
-        self.assertIn("보류 1", text)
+        self.assertIn("Held 1", text)
         self.assertIn("work-personal-v1", text)
-        self.assertIn("마지막 실행", text)
+        self.assertIn("Last run", text)
         self.assertNotIn("private", text)
 
     def test_migration_reports_changed_sender_preference_semantics(self):
         self.first_setup()
-        self.assertIn("발신자·키워드는 AI 판단의 참고", self.output.getvalue())
-        self.assertIn("대기 알림은 기존 목적지", self.output.getvalue())
+        self.assertIn("Senders and keywords", self.output.getvalue())
+        self.assertIn("Pending notifications keep", self.output.getvalue())
 
     def test_setup_preserves_operational_limits_and_clears_verified_source_hold(self):
         account = self.first_setup()
@@ -214,7 +329,7 @@ class CliTests(unittest.TestCase):
         store = self.host.open_store()
         store.set_meta(f"source_hold:{account.id}", {"code": "credential_unavailable"})
         store.close()
-        self.assertEqual(self.setup_with(["edit", account.id, "", "", "", "", "done"]), 0)
+        self.assertEqual(self.setup_with(["edit", account.id, "", "", "", "", "done", "no", "yes"]), 0)
         self.assertEqual(self.host.settings.max_fetches, 3)
         self.assertEqual(self.host.settings.always_notify_senders, ("boss@example.com",))
         store = self.host.open_store()
@@ -239,6 +354,28 @@ class CliTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertEqual(result["error"], "queue_scope_required")
         self.assertTrue(result["next_action"])
+
+    def test_setup_cli_language_options_are_forwarded_and_help_is_bilingual(self):
+        parser = argparse.ArgumentParser()
+        self.module.configure_parser(parser)
+        self.assertIn("설정", parser.format_help())
+        self.assertIn("setup", parser.format_help().lower())
+        for command in (["setup"], ["accounts", "add"], ["accounts", "edit", "a1"]):
+            args = parser.parse_args([*command, "--ui-language", "en"])
+            with patch.object(self.module, "setup_plugin", return_value=0) as setup:
+                self.assertEqual(self.module.run_cli(args, self.host), 0)
+                self.assertEqual(setup.call_args.kwargs["ui_language"], "en")
+
+    def test_new_user_must_confirm_and_defaults_come_from_locale(self):
+        with patch.dict("os.environ", {"LC_ALL": "en_US.UTF-8", "LC_MESSAGES": "ko_KR", "LANG": "ko_KR"}):
+            self.assertEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "no"]), 1)
+            self.assertEqual(self.host.load_settings().accounts, ())
+            self.assertEqual(self.host.passwords, {})
+            self.assertEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "yes"]), 0)
+        account = self.host.load_settings().accounts[0]
+        self.assertEqual((account.label, account.mailbox), ("me@example.com", "INBOX"))
+        self.assertEqual(self.host.load_settings().language, "en")
+        self.assertIn("app password", self.output.getvalue().lower())
 
 
 if __name__ == "__main__":

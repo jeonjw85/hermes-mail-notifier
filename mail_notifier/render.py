@@ -4,6 +4,7 @@ import re
 import unicodedata
 
 from .config import Account, MAX_NOTIFICATION_UNITS
+from .i18n import text
 from .message import MailContent
 from .triage import TriageResult
 
@@ -29,26 +30,26 @@ def _field(text: str, budget: int) -> str:
     return "".join(chunks) + "…"
 
 
-def render_notification(account: Account, mail: MailContent, result: TriageResult, *, mail_id="") -> str:
+def render_notification(account: Account, mail: MailContent, result: TriageResult, *, mail_id="", language="ko") -> str:
     sender = f"{mail.sender_name} <{mail.sender_address}>" if mail.sender_name else mail.sender_address
-    priority = {"high": "높음", "normal": "보통", "low": "낮음"}[result.priority]
-    category = {"work": "업무", "personal": "개인", "transactional": "거래·서비스",
-                "promotion": "홍보", "newsletter": "뉴스레터", "unknown": "판단 불충분"}[result.category]
+    priority = text(f"priority.{result.priority}", language)
+    category = text(f"category.{result.category}", language)
     lines = [
-        f"[{'원문 확인' if result.decision == 'review' else '중요 메일'} · {_field(account.label, 100)}]",
-        f"우선순위: {priority}",
-        f"분류: {category}",
-        f"보낸 사람: {_field(sender or '확인 불가', 300)}",
-        f"제목: {_field(mail.subject or '(제목 없음)', 420)}",
-        f"이유: {_field(result.reason, 400)}",
-        f"요약: {_field(result.summary or '본문 확인 필요', 1200)}",
-        f"할 일: {_field(result.action or '명시 없음', 500)}",
-        f"기한: {_field(result.deadline or '명시 없음', 200)}",
+        text("notification.header", language, title=text("notification.review" if result.decision == "review" else "notification.notify", language),
+             account=_field(account.label, 100)),
+        text("notification.priority", language, value=priority),
+        text("notification.category", language, value=category),
+        text("notification.sender", language, value=_field(sender or text("notification.unknown_sender", language), 300)),
+        text("notification.subject", language, value=_field(mail.subject or text("notification.no_subject", language), 420)),
+        text("notification.reason", language, value=_field(result.reason, 400)),
+        text("notification.summary", language, value=_field(result.summary or text("notification.check_body", language), 1200)),
+        text("notification.action", language, value=_field(result.action or text("notification.not_specified", language), 500)),
+        text("notification.deadline", language, value=_field(result.deadline or text("notification.not_specified", language), 200)),
     ]
     if mail_id:
-        lines.append(f"메일 ID: {_field(mail_id, 64)}")
+        lines.append(text("notification.mail_id", language, value=_field(mail_id, 64)))
     if mail.needs_body_review or mail.truncated or result.decision == "review":
-        lines.append("※ 본문 확인 필요: 메일의 일부 내용만 확인했습니다.")
-    text = "\n".join(lines)
-    assert utf16_length(text) <= MAX_NOTIFICATION_UNITS
-    return text
+        lines.append(text("notification.partial_body", language))
+    notification = "\n".join(lines)
+    assert utf16_length(notification) <= MAX_NOTIFICATION_UNITS
+    return notification

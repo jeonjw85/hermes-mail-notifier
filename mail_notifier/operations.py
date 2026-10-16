@@ -144,15 +144,34 @@ def policy(host, *, changes=None):
 def set_account_enabled(host, account_id, enabled, *, mailbox_factory=ImapMailbox):
     if type(enabled) is not bool:
         raise HostError("invalid_enabled")
-    with _store(host, write=True) as store:
-        account = _account(host, account_id)
-        if enabled:
-            with mailbox_factory(account, host.get_password(account)) as mailbox:
-                baseline = mailbox.snapshot()
-            store.initialize(account, *baseline)
-            store.resume_source(account_id, time.time())
-        settings = host.load_settings()
-        settings = replace(settings, accounts=tuple(replace(a, enabled=enabled) if a.id == account_id else a for a in settings.accounts))
-        host.save_settings(settings)
-        job_id = host.install_schedule(settings, store)
-        return {"account_id": account_id, "enabled": enabled, "cron_job_id": job_id}
+    from .onboarding import OnboardingService
+    from .onboarding_auth import SetupOwner
+    from .i18n import resolve_ui_language
+    _account(host, account_id)
+    service = OnboardingService(host, mailbox_factory=mailbox_factory)
+    owner = SetupOwner(str(host.home()), "cli")
+    draft = service.start(owner)
+    if draft.state == "scheduled":
+        # An explicit account command also hands off a fully published paused
+        # attempt. It never resumes cron or adopts that attempt's old inputs.
+        preview = service.preview(draft.id, owner)
+        service.acknowledge(draft.id, owner, draft.revision,
+                            current_fingerprint=preview["current_settings_fingerprint"])
+        draft = service.start(owner)
+    # This existing explicit command is the confirmation. Never adopt and
+    # publish unrelated inputs left by an interactive setup session.
+    expected = replace(draft.original, ui_language=resolve_ui_language(saved=draft.original.ui_language))
+    if draft.form or draft.candidate != expected or draft.state != "draft":
+        raise HostError("setup_changed_retry")
+    draft = service.change(draft.id, owner, draft.revision, action="enable" if enabled else "disable",
+                           values={"account_id": account_id})
+    if enabled:
+        draft = service.validate_password(draft.id, owner, draft.revision, "")
+        if draft.state != "awaiting_confirmation":
+            code = draft.steps.get("error_code", "credential_unavailable")
+            service.cancel(draft.id, owner, draft.revision)
+            raise HostError(code)
+    result = service.commit(draft.id, owner, draft.revision)
+    if result["state"] not in {"completed", "scheduled"}:
+        raise HostError(result.get("error", "setup_repair_required"))
+    return {"account_id": account_id, "enabled": enabled, "cron_job_id": result.get("cron_job_id", "")}

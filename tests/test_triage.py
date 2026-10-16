@@ -75,6 +75,47 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(result.decision, "review")
         self.assertTrue(result.important)
 
+    def test_fixed_user_rule_reasons_follow_summary_language_not_ui_language(self):
+        settings = Settings(language="en", ui_language="ko", ignored_senders=("@example.com",))
+        ignored = self.module.triage_message(self.mail, settings, self.complete)
+        self.assertEqual(ignored.reason, "Sender excluded by the user")
+        self.assertEqual((ignored.decision, ignored.origin), ("suppress", "user_rule"))
+        self.complete.assert_not_called()
+        settings = replace(settings, ignored_senders=(), always_notify_senders=("@example.com",))
+        forced = self.module.triage_message(self.mail, settings, self.complete)
+        self.assertEqual(forced.reason, "Required notification by user rule · Routine")
+        self.assertEqual((forced.decision, forced.origin), ("notify", "user_rule"))
+        self.assertEqual(forced.summary, "내용 요약")
+
+    def test_incomplete_body_reason_is_localized_and_stays_within_schema_limit(self):
+        for language, prefix in (("en", "Incomplete body; check the original email · "),
+                                 ("fr", "Incomplete body; check the original email · "),
+                                 ("ko", "본문이 불완전해 원문 확인 필요 · ")):
+            with self.subTest(language=language):
+                output = {**self.output, "reason": "R" * 500}
+                result = self.module.triage_message(replace(self.mail, needs_body_review=True),
+                                                   Settings(language=language), lambda _: output)
+                self.assertEqual(result.decision, "review")
+                self.assertTrue(result.reason.startswith(prefix))
+                self.assertLessEqual(len(result.reason), 500)
+        forced = self.module.triage_message(self.mail, Settings(language="en", always_notify_senders=("@example.com",)),
+                                           lambda _: {**self.output, "reason": "R" * 500})
+        self.assertLessEqual(len(forced.reason), 500)
+
+    def test_review_fallback_localizes_only_its_fixed_summary(self):
+        empty = replace(self.mail, subject="")
+        self.assertEqual(self.module.review_result(empty, "Caller reason").summary, "본문 확인 필요")
+        for language in ("en", "fr"):
+            result = self.module.review_result(empty, "Caller reason", language=language)
+            self.assertEqual(result.summary, "Check the email body")
+            self.assertEqual(result.reason, "Caller reason")
+            self.assertEqual(result.origin, "review_fallback")
+
+    def test_arbitrary_summary_language_is_passed_unchanged_to_model(self):
+        result = self.module.triage_message(self.mail, Settings(language="fr", ui_language="en"), self.complete)
+        self.assertIn("in this language: fr.", self.complete.call_args.args[0]["instructions"])
+        self.assertEqual(result.summary, "내용 요약")
+
     def test_invalid_enum_missing_fields_and_unquoted_evidence_retry(self):
         for changes in ({"category": "other"}, {"priority": "critical"}, {"decision": "discard"},
                         {"evidence": ["invented deadline"]}, {"evidence": "not a list"},

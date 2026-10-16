@@ -5,7 +5,7 @@ description = "Important-email summaries for Hermes Agent and Telegram"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["cryptography>=50.0.1,<51"]
 
 [project.optional-dependencies]
 dev = ["ruff==0.17.0", "pyright==1.1.414"]

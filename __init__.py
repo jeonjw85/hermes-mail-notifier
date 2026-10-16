@@ -7,6 +7,7 @@ from .mail_notifier import operations
 from .mail_notifier.diagnostics import diagnose, next_action
 from .mail_notifier.hermes_host import HermesHost, HostError
 from .mail_notifier.service import check_mail, error_code, get_status
+from .mail_notifier.telegram_onboarding import TelegramOnboarding
 
 
 def _parameters(properties, required=()):
@@ -55,6 +56,17 @@ def _validate(value, schema):
 
 
 def register(ctx):
+    onboarding = TelegramOnboarding(ctx)
+    if all(callable(getattr(ctx, method, None)) for method in ("register_hook", "register_telegram_handler", "on_unload")):
+        ctx.register_hook("post_gateway_admission", onboarding.on_admission)
+        ctx.register_telegram_handler(onboarding.telegram_factory)
+        ctx.on_unload(onboarding.unload)
+    name = "mail_notifier_setup"
+    description = "Open the mail connection panel in the current authenticated private Telegram chat. Takes no arguments; never accepts passwords."
+    ctx.register_tool(name=name, toolset="mail_notifier", description=description,
+                      handler=onboarding.open_setup_panel,
+                      schema={"name": name, "description": description, "parameters": _parameters({})})
+
     def command(args):
         return run_cli(args, HermesHost(ctx))
 

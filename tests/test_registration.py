@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+import builtins
 
 
 class RegistrationTests(unittest.TestCase):
@@ -30,10 +31,70 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(ctx.register_cli_command.call_args.kwargs["name"], "mail-notifier")
         names = {call.kwargs["name"] for call in ctx.register_tool.call_args_list}
         self.assertEqual(names, {"mail_notifier_check", "mail_notifier_status", "mail_notifier_history",
-                                "mail_notifier_queue", "mail_notifier_feedback", "mail_notifier_policy", "mail_notifier_doctor"})
+                                "mail_notifier_queue", "mail_notifier_feedback", "mail_notifier_policy", "mail_notifier_doctor", "mail_notifier_setup"})
         manifest = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text()
         for name in names:
             self.assertIn(name, manifest)
+        self.assertEqual(ctx.register_hook.call_args.args[0], "post_gateway_admission")
+        self.assertEqual(ctx.register_telegram_handler.call_count, 1)
+        self.assertTrue(ctx.on_unload.called)
+
+    def test_manifest_tools_match_exactly_and_no_model_tool_can_set_hosting_url(self):
+        module = self.load_plugin()
+        ctx = Mock()
+        module.register(ctx)
+        manifest = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text()
+        tools = {call.kwargs["name"]: call.kwargs for call in ctx.register_tool.call_args_list}
+        section = manifest.split("provides_tools:\n", 1)[1].split("config_schema:", 1)[0]
+        self.assertEqual({line.strip()[2:] for line in section.splitlines() if line.strip()}, set(tools))
+        for tool in tools.values():
+            self.assertNotIn("credential_page_url", json.dumps(tool["schema"]))
+        result = json.loads(tools["mail_notifier_policy"]["handler"]({"changes": {"credential_page_url": "https://untrusted.example/"}}))
+        self.assertFalse(result["success"])
+        result = json.loads(tools["mail_notifier_setup"]["handler"]({"credential_page_url": "https://untrusted.example/"}))
+        self.assertEqual(result["error"], "invalid_tool_arguments")
+        ctx.set_config.assert_not_called()
+
+    def test_setup_rejects_all_arguments_and_without_origin_only_guides_to_mail(self):
+        module = self.load_plugin()
+        ctx = Mock()
+        module.register(ctx)
+        tools = {c.kwargs["name"]: c.kwargs for c in ctx.register_tool.call_args_list}
+        self.assertIn("mail_notifier_setup", tools)
+        tool = tools["mail_notifier_setup"]
+        self.assertEqual(tool["schema"]["parameters"]["properties"], {})
+        for args in ({"password": "test-only-secret"}, {"chat_id": "222"}, [], None):
+            result = tool["handler"](args)
+            self.assertEqual(json.loads(result)["error"], "invalid_tool_arguments")
+            self.assertNotIn("test-only-secret", result)
+        result = json.loads(tool["handler"]({}))
+        self.assertEqual(result["next_action"], "/mail")
+        ctx.get_config.assert_not_called()
+
+    def test_import_and_registration_need_neither_sdk_crypto_host_nor_workers(self):
+        original = builtins.__import__
+        def guarded(name, *args, **kwargs):
+            if name.split(".", 1)[0] in {"telegram", "cryptography", "hermes_cli", "gateway"}:
+                raise AssertionError("Eager optional dependency: " + name)
+            return original(name, *args, **kwargs)
+        with patch("builtins.__import__", guarded), patch("asyncio.create_task", side_effect=AssertionError("task at registration")), patch("concurrent.futures.ThreadPoolExecutor", side_effect=AssertionError("worker at registration")):
+            module = self.load_plugin()
+            ctx = Mock()
+            module.register(ctx)
+        ctx.get_config.assert_not_called()
+        self.assertEqual(ctx.register_tool.call_count, 8)
+
+    def test_setup_origin_failure_is_safe_json_and_never_falls_back_to_ambient_identity(self):
+        module = self.load_plugin()
+        ctx = Mock()
+        module.register(ctx)
+        tool = next(c.kwargs["handler"] for c in ctx.register_tool.call_args_list if c.kwargs["name"] == "mail_notifier_setup")
+        origin = sys.modules[module.__name__ + ".mail_notifier.onboarding_auth"].OriginProofs
+        with patch.object(origin, "current", side_effect=RuntimeError("test-only-private-error")):
+            result = tool({})
+        self.assertEqual(json.loads(result)["next_action"], "/mail")
+        self.assertNotIn("test-only-private-error", result)
+        ctx.get_config.assert_not_called()
 
     def test_tool_handlers_always_return_json_including_errors(self):
         module = self.load_plugin()

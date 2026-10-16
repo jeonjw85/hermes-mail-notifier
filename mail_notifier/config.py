@@ -77,6 +77,7 @@ class Settings:
     max_deliveries: int = 20
     max_pending: int = 2000
     max_cached_bodies: int = 200
+    ui_language: str = ""
 
     def __post_init__(self):
         if type(self.schema_version) is not int or self.schema_version != 2:
@@ -98,6 +99,8 @@ class Settings:
             value = _text(getattr(self, name), name)
             if any(ord(char) < 32 for char in value):
                 raise ConfigError(f"{name} must not contain control characters")
+        if not isinstance(self.ui_language, str) or self.ui_language not in ("", "ko", "en"):
+            raise ConfigError("ui_language must be empty, ko, or en")
         if not re.fullmatch(r"telegram(?::-?[1-9]\d*(?::[1-9]\d*)?)?", self.target):
             raise ConfigError("target must be telegram or telegram:chat_id[:thread_id]")
         for name in ("important_senders", "ignored_senders", "important_keywords", "always_notify_senders"):

@@ -16,28 +16,61 @@ Install the plugin on the server running Hermes:
 hermes plugins install jeonjw85/hermes-mail-notifier --enable
 ```
 
-Run the initial setup:
+Open a private chat with the profile's existing Telegram bot and send **`/mail`**. Choose **한국어 / English**, then the mail service. Non-secret management works without a credential page. **No public credential-page URL is configured in this version**: new connections and password replacement require the operator to configure a trusted HTTPS `credential_page_url` first. Never send passwords in chat.
+
+Optional secure terminal setup:
 
 ```sh
-hermes mail-notifier setup
+hermes mail-notifier setup --ui-language en
 ```
 
-Run installation and setup in **the same Hermes profile that already uses Telegram**. Enter app passwords in an interactive terminal on the server; password input is hidden.
+Run installation and setup in **the same Hermes profile that already uses Telegram**. The terminal alternative uses hidden password input; Telegram uses only the encrypted Mini App opened by the bot's secure reply-keyboard button.
 
 Requirements:
 - Linux or macOS with Python 3.11 or later. The plugin runs with the Python interpreter used by your Hermes installation.
 - Hermes with native plugins, plugin CLI commands, `ctx.llm.complete_structured`, profile-scoped settings/storage, script-only cron, and `hermes send --json`.
+- Telegram onboarding additionally needs `post_gateway_admission`, native Telegram handler registration and unload callbacks, authenticated profile routing, and live-origin context. Older/incompatible hosts fail closed for onboarding (`incompatible_hermes_onboarding`); existing commands remain available where their own host contracts are supported. Windows plugin hosts are not supported.
 - A configured model and Telegram connection in the current profile. Automatic checks require that profile's **Hermes gateway to be running**.
 
 Scheduled runs reload credentials in a new process. Store model and Telegram credentials in the same profile's Hermes configuration (`.env`, authentication files, or a reloadable secret source). The `setup` preflight check detects **credentials available only through shell/systemd environment variables** and reports them before enabling the scheduled job. Save those credentials in the profile's Hermes configuration, then run setup again.
 
-Host integration contracts have been verified against Hermes source revision `d5aa9d7adf308ca466a118206c201254cf3ca977`. The plugin has no additional Python runtime dependencies.
+Host integration contracts have been verified against Hermes source revision `d5aa9d7adf308ca466a118206c201254cf3ca977`. The plugin declares `cryptography>=50.0.1,<51` as a Python runtime dependency for encrypted credential input. Ensure it is installed in the same Python environment as Hermes (for a source checkout, `python -m pip install -e .`). Telegram SDK modules are loaded lazily from Hermes; they are not a separate plugin dependency. If cryptography is missing, encrypted input fails closed before a credential is requested; existing check/status commands and plugin registration remain available. Node is only used for development/CI interoperability tests, not at runtime.
 
 ## Verification and Release Status
 
-Local verification: 183 tests passed with pinned Hermes, including process recovery checks. A 50-account, 10,000-message simulation completed without lost or duplicate deliveries. Real-model accuracy and live-server delivery checks remain pending.
+Offline verification includes pinned-Hermes admission/loader/reload contracts, encrypted-input interoperability, management and process recovery. A 50-account, 10,000-message simulation completed without lost or duplicate deliveries. These are not live Telegram, mail-server or model-accuracy tests.
+
+Public hosting/Pages activation and a release-default credential-page URL remain unconfigured. Live Android/iOS/Desktop reply-keyboard and encrypted-return checks, provider accounts, model/delivery verification, and the remote/container/no-inbound deployment matrix remain release gates. No Telegram client or deployment form is claimed live-verified. The Mini App needs HTTPS and Telegram/Web Crypto support; it does not require an installer dashboard, domain or inbound port. A blocked/unavailable page affects credential entry, not existing notifications or non-secret management. Use the optional CLI rather than plaintext chat if secure entry is unavailable.
+
+| Compatibility target | Current evidence / limit |
+| --- | --- |
+| Linux/macOS; Python 3.11+ plugin code | CI targets Ubuntu 3.11 and 3.14; pinned-host contracts use 3.14. This is not a claim that the pinned Hermes release itself runs on every older Python. |
+| Local/remote/NAT/no dashboard | Same bot and outbound connections; no new listener, domain, dashboard, or second `getUpdates` consumer. Live deployment checks remain pending. |
+| Docker profile volume | Offline two-container write/resume smoke below; checks Korean/English recovery and 0700/0600 plugin data/credential permissions in a securely created synthetic profile. Not live mail/Telegram, insecure-profile repair or arbitrary UID/volume-policy proof. |
+| Telegram Android/iOS/Desktop | Candidate clients, but no actual supported versions recorded yet. Reply **KeyboardButton** launch and encrypted `sendData` must be verified on each. |
+| Telegram Web/other clients | Not claimed supported until actually verified, even if a bridge is detected. Missing Web Crypto/bridge or a blocked page prevents secure input. |
+| Ordinary browser, inline/menu Mini App launch | Not supported credential-return paths; never paste a password into chat to bypass this. |
+
+The client needs access to the HTTPS static page and Telegram. The Hermes host separately needs outbound Telegram API, provider IMAP/TLS (993), and its configured model/auth endpoints. This does not change the existing Telegram polling/webhook mode or eliminate its existing network requirements.
+
+### Operator-only credential-page configuration
+
+In the active profile's **`HERMES_HOME/config.yaml`**, the exact key is **`plugins.entries.hermes-mail-notifier.settings.credential_page_url`**, alongside (not inside) `settings.configuration`. Merge into the existing configuration; do not replace other plugin/profile settings:
+
+```yaml
+plugins:
+  entries:
+    hermes-mail-notifier:
+      settings:
+        credential_page_url: ""
+```
+
+The empty value above is intentional, not a usable public URL. Only an operator may replace it with a trusted, verified **HTTPS page serving this repository's `web/credentials/v1/` protocol** and reload the gateway. Userinfo, fragments, non-HTTPS URLs and incompatible wire versions are rejected. The generated public challenge is in the `#mn=...` fragment, never a password. Neither chat input, `mail_notifier_setup`, nor policy tools can change the hosting URL. The page operator can serve JavaScript that sees the password: trust and verify that operator; encryption is transport protection, not proof of page authenticity or sender authorization.
+
+`.github/workflows/pages.yml` prepares a **manual `workflow_dispatch` only** publication of **`web`**, preserving `/credentials/v1/` beneath the site's root. It uses the `github-pages` environment and narrowly scoped deployment permissions. It does not enable Pages or prove a reachable public page. No activation, dispatch, deployment, or verified default URL is included in this work. A future operator-approved release must verify the actual HTTPS URL and v1 protocol before setting a default; do not overwrite the v1 path with a new protocol. Self-hosting is optional, not a requirement imposed on every installer. Without a trusted page, use `hermes mail-notifier setup --ui-language en` with hidden terminal input; existing checks and non-secret management continue.
 
 ```sh
+# First prepare the pinned parser/SDK prerequisites in Development and Verification.
 python -m pip install -e '.[dev]'
 python -m unittest discover -s tests
 python -m ruff check .
@@ -64,34 +97,56 @@ Official guides:
 
 Gmail support requires an account that can create app passwords. Accounts blocked from doing so by organization policies, Advanced Protection, or similar restrictions are currently unsupported. OAuth authentication is not supported.
 
-## Setup Wizard
+## Telegram Setup and Management
+
+`/mail` uses the authenticated private conversation, not model-supplied IDs. Choose a service, enter the login address, read its app-password guide, and use **Secure app password** when a trusted page is configured. Review and confirm before saving; only then do model/baseline checks, credential/settings publication, scheduling and test delivery run. New defaults: **5 minutes, INBOX, the current authenticated private chat/topic**, and the selected/detected UI language proposed for summaries. Existing settings are preserved.
+
+Later, select accounts by their numbered label/address/status buttons (five per page), without typing UUIDs. The panel supports adding accounts, labels/login/mailbox/service changes, password replacement, disabling/enabling accounts, 5/10/15/30/60-minute schedules, separate UI/summary languages, and sender/domain/keyword/instruction rules with explicit clearing. Existing advanced schedules and arbitrary summary languages are preserved until explicitly changed. All edits, including using the current chat for future notifications, show a preview and need confirmation. Existing group/topic destinations remain supported; there is no new group-discovery UI.
+
+**Status and recovery** shows cron/backlog information and offers a confirmed settings/test refresh. Recorded cron or test-delivery failures retry only unfinished steps, without repeating saved credentials, baselines or model checks. Paused automation never resumes implicitly: confirm **Resume automatic checks**, or explicitly keep it paused and continue management. Conflicts show current settings and the prior candidate; acknowledging retains evidence, does not roll back or finish failed writes, and starts a fresh review from current settings. Prepared notifications keep their text/destination, and existing account IDs, UID cursors and work are retained; changing service/login/mailbox stops the old connection and creates a new one.
+
+If a published test cannot reach its destination, **Continue management (test unfinished)** retains that attempt's evidence and opens the way to a fresh, confirmed destination change; it does not mark the test successful or resume paused checks. CLI setup offers the same handoff after declining a retry. Disable-only changes require confirmation but do not need model, credential-reload or delivery health. They preserve existing cron state without creating or resuming a job, and do not claim activation checks passed. Mixed edits and re-enabling accounts still use activation checks.
+
+Non-secret drafts last up to 24 hours without changes; pending passwords stay in process memory for at most 10 minutes and need re-entry after expiry/restart. Text edits are limited to **16 KiB UTF-8**; oversized inputs are rejected, never silently shortened. Long existing values are preserved and abbreviated only for plain-text display. Encrypted Mini App submissions retain their separate 4096-byte wire limit. The page operator, Telegram client and Hermes host are trust boundaries. Users authorized for the same Hermes profile share that profile's management authority; this is not a multi-tenant account service.
+
+## Terminal Setup Wizard
 
 Use `setup` to manage accounts and notification rules together.
 
-1. Enter `add`, then provide the service, account label, login ID, mailbox, and app password.
-2. Once the connection check passes, add any other accounts. Multiple accounts from the same service are supported.
-3. Enter `done` to finish editing accounts.
-4. Set the Telegram destination, polling interval, summary language, important and excluded senders, keywords, and additional importance criteria.
-5. Save the settings and scheduled job. A setup confirmation message is sent to Telegram.
+1. On a new installation, select the service and enter the login address directly; no action menu is required.
+2. The address is the suggested label and the mailbox is INBOX. Optionally edit these advanced account fields, then enter an **app password** using hidden terminal input.
+3. Review the connection result and settings preview. Global advanced settings (destination, schedule, languages and importance rules) are optional.
+4. Enter `yes` to explicitly confirm publication. Setup checks a synthetic email with the model, takes a fresh mailbox starting point, saves credentials/settings, updates its owned scheduled job and verifies a Telegram test-message ID.
+5. For later management, use `add`, `edit`, `disable`, `enable`, then `done`. Multiple accounts from the same service are supported. These changes also require confirmation before publication.
 
-Defaults are **every 5 minutes**, **Korean summaries**, **INBOX**, and **the current profile's Telegram home channel**. Destination examples include `telegram`, `telegram:123456789`, and `telegram:-1001234567890:456`. In the last example, the final number is the topic ID.
+Terminal new-installation defaults are **every 5 minutes**, **summaries in the selected/detected UI language**, **INBOX**, and **the current profile's Telegram home channel**. Existing schedules, destinations, summary languages (including values such as `fr`), rules and operational limits are preserved. Destination examples include `telegram`, `telegram:123456789`, and `telegram:-1001234567890:456`. In the last example, the final number is the topic ID.
 
 - `edit`: Change an account's label, password, or connection details. Enter its account ID or displayed number.
 - `disable` / `enable`: Stop or resume checks for an account. Pending notifications are preserved.
 - Enter: Keep the current value. Use `-` to clear sender lists, keyword lists, or additional criteria.
 - Ctrl-C during input: Cancel. If an external step fails after settings have been saved, setup reports the completed steps and an error code. Run `setup` again to recover.
 - Invalid fields can be corrected in place. Connection failures offer `retry`, `password`, `back`, or `cancel`; other account drafts are preserved until you save.
+- Non-secret drafts are kept in separate `setup.db` storage for at most 24 hours without changes. Validated passwords stay only in memory for up to 10 minutes. After expiry/restart, enter them again; an ambiguous credential write is never treated as a successful password replacement. Cron/test-message repair does not require re-entering an already verified, saved password or resetting the mailbox baseline.
+- A settings conflict reports `needs_review` instead of overwriting another session's changes. `already_running` preserves inputs for retry. After publication begins, setup reports completed steps rather than claiming cancellation rolled back external writes. A lost test-send response may cause a duplicate test message; it carries the same attempt ID.
 
 Only **mail arriving after an account is first connected** is checked; existing mail is not sent in bulk. New mail is processed even if it has already been read. Changing a label, password, or importance criteria does not reset the starting point. Changing the service, login ID, or mailbox disables the old connection and creates a new one.
 
-Re-running setup preserves an existing cron job's paused state. Disabling all accounts also pauses the cron job. After enabling an account again, resume the job with `hermes cron resume JOB_ID`, as shown below.
+Re-running setup preserves an existing cron job's paused state and reports `scheduled` / `resume_cron`, not automatic-check completion. Re-run `setup` to explicitly approve resuming it, or keep it paused and continue account management. Explicit `accounts enable/disable` commands can also continue management without resuming automation. The prior attempt is retained as `acknowledged`, not completed. Disabling all accounts also pauses the cron job. You can resume separately with `hermes cron resume JOB_ID`.
+
+After a settings conflict, setup shows the prior candidate and `current_settings`. You can explicitly acknowledge the old attempt and review a new draft from current settings. External-write evidence is retained; nothing is rolled back or automatically merged, and new changes require confirmation.
+
+### Languages
+
+The existing `language` setting controls model summaries and the fixed labels, fallback reasons, setup confirmation and diagnostic test notifications. Choose `ko` or `en` in `setup`, or use `hermes mail-notifier policy set --language en`. Other existing summary-language values remain supported: the model receives the value unchanged, while fixed messages fall back to English. Already prepared notifications keep their saved text and destination.
+
+The separate `ui_language` setting selects Korean/English setup, status and diagnostic guidance without changing an existing summary `language`. Choose it in `/mail`, or use `setup --ui-language ko|en` / `accounts add/edit --ui-language ko|en`. Resolution is explicit selection → saved UI language → Telegram `language_code` or CLI `LC_ALL`, `LC_MESSAGES`, `LANG` (first nonempty value) → English. Regional locales such as `ko-KR` and `en_US.UTF-8` are normalized; unsupported locales use English. CLI help shows both languages. Secure Mini App entry still requires the trusted HTTPS page configuration and live-release checks described above.
 
 ## Operations and Corrections
 
 ```sh
 hermes mail-notifier accounts list --json
-hermes mail-notifier accounts add
-hermes mail-notifier accounts edit ACCOUNT_ID
+hermes mail-notifier accounts add --ui-language en
+hermes mail-notifier accounts edit ACCOUNT_ID --ui-language en
 hermes mail-notifier accounts disable ACCOUNT_ID
 hermes mail-notifier accounts enable ACCOUNT_ID
 hermes mail-notifier doctor --json
@@ -117,7 +172,7 @@ Default `doctor` checks local configuration, credential reload, cron and backlog
 
 Corrections keep the original judgment intact and never resend completed mail. The latest 200 corrections are retained for at most 180 days; up to five matching-sender examples guide future AI judgments. Bodies expire after seven days or classification; completed decisions expire after 30 days. `status --json` includes limits, backpressure, source retry state and available usage. Missing cost data stays unknown.
 
-Hermes conversation tools: `mail_notifier_check`, `mail_notifier_status`, `mail_notifier_history`, `mail_notifier_queue`, `mail_notifier_feedback`, `mail_notifier_policy`, `mail_notifier_doctor`. Enter app passwords only through terminal setup.
+Hermes conversation tools: `mail_notifier_check`, `mail_notifier_status`, `mail_notifier_history`, `mail_notifier_queue`, `mail_notifier_feedback`, `mail_notifier_policy`, `mail_notifier_doctor`, and argument-free `mail_notifier_setup`. The setup tool only opens the panel for a verified live Telegram origin; elsewhere it directs you to `/mail`. Existing explicit policy tools and CLI commands remain available. Enter passwords only through secure Mini App entry or hidden terminal setup.
 
 ## Importance Rules
 
@@ -131,7 +186,7 @@ Sender rules accept exact addresses such as `boss@example.com` or exact domains 
 
 Default criteria prioritize meaningful work and personal correspondence, deadlines, schedule/contract changes, payment failures, and significant account security changes. Promotions, newsletters, and routine receipts are suppressed by default. Automated reservation cancellations can still need attention. For example, add `Prioritize interview schedule changes and contract deadlines` as an additional criterion.
 
-Notifications include the account, sender, subject, reason, priority, summary, action, deadline, and stable mail ID. Categories are work, personal, transactional, promotion, newsletter, and unknown; decisions are notify, suppress, and review. Missing actions/deadlines show `명시 없음` ("Not specified"). Incomplete bodies show `본문 확인 필요` ("Check the email body"); an attempted suppression of an incomplete message becomes a review notification.
+Notifications include the account, sender, subject, reason, priority, summary, action, deadline, and stable mail ID. Categories are work, personal, transactional, promotion, newsletter, and unknown; decisions are notify, suppress, and review. Missing actions/deadlines show `Not specified` in English or `명시 없음` in Korean. Incomplete bodies show `Check the email body` or `본문 확인 필요`; an attempted suppression of an incomplete message becomes a review notification. Machine-readable codes, tool fields and CLI commands are not translated.
 
 ## Commands
 
@@ -198,8 +253,10 @@ The `mail_notifier_check` and `mail_notifier_status` tools are also available in
 Paths are relative to the current profile's `HERMES_HOME`:
 
 - General settings: `plugins.entries.hermes-mail-notifier.settings.configuration` in `config.yaml` (accounts and destination saved as a single snapshot)
+- Trusted input page: `plugins.entries.hermes-mail-notifier.settings.credential_page_url` in `config.yaml` (operator-only; empty by default)
 - App passwords: `HERMES_MAIL_<ACCOUNT_ID>_APP_PASSWORD` in Hermes credential storage
 - UID checkpoints, pending notifications, and processing history: `plugin-data/hermes-mail-notifier/data.db`
+- Non-secret onboarding drafts/recovery evidence: `plugin-data/hermes-mail-notifier/setup.db` (schema v2; pending passwords/transport private keys/ciphertexts are not stored here)
 - Cron entry point: `scripts/hermes-mail-notifier.py`
 
 Full raw emails and attachments are not stored. Up to 12,000 normalized body characters are cached until classification; after seven days the cache expires and the body can be fetched again. Reasons, evidence, summaries, and completed history are retained for 30 days. Unfinished notifications are retained for retries. Default status output excludes mail bodies and summaries. Settings, passwords, and the database live outside the installed plugin code.
@@ -235,21 +292,42 @@ Automated tests use fake email, model, and delivery services. Use the server-sid
 
 ## Development and Verification
 
-The default tests require no external services, credentials, or additional packages.
+Install the declared runtime and development dependencies first. The compatibility suite also uses the pinned Hermes cron parser and Telegram SDK: prepare a sibling `../hermes` checkout at the revision above, with its Telegram extra. On Python 3.11, install the two parser-import dependencies explicitly because that host's core dependencies are guarded for Python 3.14+. This does not certify the full host on 3.11. Default tests need no live services or credentials; host-only tests are intentionally skipped unless `HERMES_CONTRACT=1`. Node **24** is development/CI-only and uses the same dependency-equipped Python for real Web Crypto interoperability.
 
 ```sh
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q __init__.py mail_notifier tests
+python -m pip install -e '.[dev]'
+python -m pip install -e '../hermes[telegram]'
+# Python 3.11 parser prerequisites only:
+python -m pip install 'ruamel.yaml==0.18.16' 'python-dotenv==1.2.2'
+python -m unittest discover -s tests -v
+python -m compileall -q __init__.py mail_notifier tests
+python -m ruff check .
+python -m pyright
+PYTHON=python node --test tests/web/*.test.mjs
+python -m tests.load_scenario --output load-report.json
 ```
 
-In a Python environment with Hermes installed, you can also verify the real host integration contracts. These tests use temporary profiles and do not connect to external email, model, or Telegram services.
+For the host gate, install Hermes revision `d5aa9d7adf308ca466a118206c201254cf3ca977` **with its Telegram extra** in the same Python 3.14 environment, then install this plugin and dev dependencies. CI requires actual host/SDK imports before running the entire suite with `HERMES_CONTRACT=1`, and fails on **any skip**, not just test failures. These tests use temporary synthetic profiles and remote-service doubles; they are not live admission/delivery tests.
 
 ```sh
-hermes plugins doctor . --ci
-HERMES_CONTRACT=1 python -m unittest tests.test_hermes_contract -v
+python -c 'import cryptography, telegram; from hermes_cli.plugins import PluginContext, PluginManager; from gateway.run import GatewayRunner; from plugins.platforms.telegram.adapter import TelegramAdapter'
+HERMES_CONTRACT=1 python -m unittest discover -s tests -v
+HERMES_CONTRACT=1 python -m unittest tests.test_hermes_contract tests.test_telegram_contract -v
 ```
 
-CI runs the default tests and syntax checks on Ubuntu with Python 3.11 and 3.14.
+CI installs dependencies → runs unittest → compileall → ruff/pyright on Python 3.11/3.14, then Node 24 web/interop tests; separate jobs retain pinned-host, interruption recovery, and 50-account/10,000-event load checks. Workflow/configuration tests do **not** establish HTTPS reachability or device safety.
+
+For an offline no-inbound Docker check (a daemon and build-time internet are required):
+
+```sh
+python tests/container/check_context.py
+docker build -f tests/container/Dockerfile -t mail-onboarding-smoke .
+python tests/container/run.py
+```
+
+The allowlisted build context excludes `.env`, databases, `.venv`, `.git`, and local agent/planning/runtime records. Dependencies and the pinned host/Telegram extra are installed into the image before execution. The runner creates one UUID-named temporary volume, mounts **only that profile volume** into two distinct `--rm --network none` write/resume containers, publishes **no ports**, and removes only its own volume. External Telegram/IMAP/model operations are fake and reported as such. No daemon/build/run means the smoke is unperformed, not supported-by-assumption. Successful offline smoke still leaves public HTTPS, recorded client versions, fresh/existing live profiles, remote/container deployment, Naver/Daum/Gmail login, synthetic model diagnosis, Telegram receipt and later new-mail notifications in both languages as separate, operator-approved release gates. Do not run live commands against an actual profile without that approval.
+
+`check_context.py` exercises Docker's actual filter with inert temporary required/forbidden files, a scratch build and local output; it pulls no image and starts no container. This behavioral check also runs before the image build in CI.
 
 ## License
 

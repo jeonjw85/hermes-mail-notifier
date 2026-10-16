@@ -1,0 +1,22 @@
+# Deny by default: no credentials, databases, virtualenvs, Git or local records.
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!__init__.py
+!plugin.yaml
+# Reopen files, not directory trees. Deny descendants of extension-shaped
+# directories too: Docker patterns match parents as well as the file itself.
+!mail_notifier/*.py
+mail_notifier/*/*
+!tests/*.py
+tests/*/*
+!tests/container/*.py
+!tests/container/Dockerfile
+tests/container/*/*
+!web/credentials/v1/index.html
+!web/credentials/v1/app.mjs
+!web/credentials/v1/crypto.mjs
+!web/credentials/v1/messages.mjs
+!web/credentials/v1/styles.css
+web/credentials/v1/*/*

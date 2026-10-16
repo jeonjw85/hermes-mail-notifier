@@ -9,7 +9,12 @@ provides_tools:
   - mail_notifier_feedback
   - mail_notifier_policy
   - mail_notifier_doctor
+  - mail_notifier_setup
 config_schema:
+  credential_page_url:
+    type: string
+    description: "Operator-only trusted HTTPS v1 page (web/credentials/v1/). No verified public default; empty disables new secure input, not existing checks or non-secret management."
+    default: ""
   configuration:
     type: dict
     description: "Atomic settings snapshot. Manage with hermes mail-notifier setup; passwords are secret references only."
@@ -19,6 +24,7 @@ config_schema:
       schedule: "every 5m"
       target: telegram
       language: ko
+      ui_language: ""
       important_senders: []
       ignored_senders: []
       important_keywords: []

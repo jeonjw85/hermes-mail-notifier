@@ -11,10 +11,14 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import PLUGIN_ID, Account, Settings, dump_settings, load_settings
 from .store import StorageError, Store
 from .triage import ModelReply, TriageError
+
+if TYPE_CHECKING:
+    from .onboarding_store import SetupStore
 
 _MARKER = "Managed by hermes-mail-notifier."
 _CHILD_ENV = frozenset({
@@ -70,6 +74,41 @@ class HermesHost:
         except Exception:
             raise HostError("settings_save_failed") from None
 
+    def has_saved_settings(self) -> bool:
+        missing = object()
+        return any(self.ctx.get_config(key, missing) is not missing
+                   for key in ("configuration", *dump_settings(Settings())))
+
+    def credential_page_url(self) -> str:
+        # Operator configuration, deliberately outside user-editable Settings.
+        value = self.ctx.get_config("credential_page_url", "")
+        if not isinstance(value, str):
+            raise HostError("invalid_credential_url")
+        return value
+
+    def check_onboarding_compatibility(self) -> None:
+        """Independent native-admission capability gate; no subprocess/network I/O."""
+        try:
+            from hermes_cli.plugins import PluginContext, VALID_HOOKS
+            from gateway.platforms.event import MessageEvent
+            from gateway import session_context
+            from hermes_constants import get_hermes_home
+            from agent.delegation_context import is_delegated_child_process_context
+            if "post_gateway_admission" not in VALID_HOOKS:
+                raise HostError()
+            if not all(callable(getattr(PluginContext, name, None)) for name in
+                       ("register_hook", "register_telegram_handler", "on_unload")):
+                raise HostError()
+            if not {"internal", "raw_message", "allow_gateway_control"} <= set(MessageEvent.__dataclass_fields__):
+                raise HostError()
+            if not all(hasattr(session_context, name) for name in
+                       ("_SESSION_KEY", "_SESSION_MESSAGE_ID", "_SESSION_PLATFORM", "_SESSION_CHAT_TYPE", "_CRON_SESSION")):
+                raise HostError()
+            if not callable(get_hermes_home) or not callable(is_delegated_child_process_context):
+                raise HostError()
+        except Exception:
+            raise HostError("incompatible_hermes_onboarding") from None
+
     def get_password(self, account: Account) -> str:
         try:
             from agent.secret_scope import get_secret
@@ -108,6 +147,16 @@ class HermesHost:
             raise
         except Exception:
             raise HostError("storage_unavailable") from None
+
+    def open_setup_store(self) -> "SetupStore":
+        try:
+            from plugins.plugin_storage import plugin_data_dir
+            from .onboarding_store import SetupStore
+            return SetupStore(plugin_data_dir(PLUGIN_ID) / "setup.db")
+        except HostError:
+            raise
+        except Exception:
+            raise HostError("setup_storage_unavailable") from None
 
     def complete_structured(self, payload: dict, *, timeout=45) -> ModelReply:
         try:
@@ -296,7 +345,7 @@ class HermesHost:
             if name and os.path.exists(name):
                 os.unlink(name)
 
-    def install_schedule(self, settings: Settings, store: Store) -> str:
+    def _owned_schedule(self):
         script = self.home() / "scripts" / "hermes-mail-notifier.py"
         jobs = self.manage_cron("list", include_disabled=True).get("jobs")
         if not isinstance(jobs, list):
@@ -306,13 +355,37 @@ class HermesHost:
                  and job.get("script") and (script.parent / job["script"]).resolve() == script.resolve()]
         if len(owned) > 1:
             raise HostError("duplicate_owned_cron_jobs")
-        existing = owned[0] if owned else None
+        return owned[0] if owned else None
+
+    def resume_schedule(self, job_id: str, store: Store) -> None:
+        existing = self._owned_schedule()
+        if existing is None or existing.get("job_id") != job_id:
+            raise HostError("cron_ownership_failed")
+        self.manage_cron("resume", job_id=job_id)
+        current = self._owned_schedule()
+        if current is None or current.get("job_id") != job_id or current.get("enabled") is False or current.get("state") == "paused":
+            raise HostError("cron_operation_failed")
+        store.set_meta("cron_job_id", job_id)
+        store.set_meta("cron_paused", False)
+
+    def install_schedule(self, settings: Settings, store: Store, *, disable_only: bool = False) -> str:
+        script = self.home() / "scripts" / "hermes-mail-notifier.py"
+        existing = self._owned_schedule()
+        if disable_only and any(account.enabled for account in settings.accounts):
+            # Reducing enabled sources must not activate an absent job. No
+            # schedule/destination change belongs to a disable-only snapshot.
+            job_id = existing["job_id"] if existing else ""
+            store.set_meta("cron_job_id", job_id or None)
+            store.set_meta("cron_paused", bool(existing and (existing.get("enabled") is False or existing.get("state") == "paused")))
+            return job_id
         if not any(account.enabled for account in settings.accounts):
             if existing:
                 self.manage_cron("pause", job_id=existing["job_id"])
                 store.set_meta("cron_job_id", existing["job_id"])
+                store.set_meta("cron_paused", True)
                 return existing["job_id"]
             store.set_meta("cron_job_id", None)
+            store.set_meta("cron_paused", False)
             return ""
         self._write_shim(script)
         fields = dict(name=PLUGIN_ID, prompt=_MARKER, schedule=settings.schedule,
@@ -325,6 +398,7 @@ class HermesHost:
         if not isinstance(job_id, str) or not job_id:
             raise HostError("invalid_cron_response")
         store.set_meta("cron_job_id", job_id)
+        store.set_meta("cron_paused", bool(existing and (existing.get("enabled") is False or existing.get("state") == "paused")))
         return job_id
 
     def check_compatibility(self) -> None:

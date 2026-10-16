@@ -10,24 +10,48 @@ permissions:
 jobs:
   unittest:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: plugin
     strategy:
       matrix:
         python: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: d5aa9d7adf308ca466a118206c201254cf3ca977
+          path: hermes
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install plugin and development dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Install real parser and Telegram SDK test prerequisites
+        run: python -m pip install -e '../hermes[telegram]'
+      # This host's core dependencies are Python >=3.14 guarded. Its isolated
+      # cron-parser tests on 3.11 need these two declared host dependencies only;
+      # this is not a claim that the full pinned host supports a 3.11 runtime.
+      - name: Install legacy-Python parser import dependencies
+        if: matrix.python == '3.11'
+        run: python -m pip install 'ruamel.yaml==0.18.16' 'python-dotenv==1.2.2'
       - name: Unit and integration tests
         run: python -m unittest discover -s tests -v
       - name: Syntax check
         run: python -m compileall -q __init__.py mail_notifier tests
-      - name: Install development checks
-        run: python -m pip install -e '.[dev]'
       - name: Lint and type check
         run: |
           python -m ruff check .
           python -m pyright
+      - name: Mini App and real Web Crypto interoperability tests
+        run: node --test tests/web/*.test.mjs
 
   hermes-contract:
     runs-on: ubuntu-latest
@@ -44,15 +68,46 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
-      - name: Install pinned Hermes
-        run: python -m pip install -e ./hermes
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install pinned Hermes with Telegram and plugin dependencies
+        run: |
+          python -m pip install -e './hermes[telegram]' -e './plugin[dev]'
+          python -m pip check
       - name: Require actual host imports
-        run: python -c 'from hermes_cli.plugins import PluginContext, PluginManager; from plugins.plugin_storage import plugin_db'
+        run: python -c 'import cryptography, telegram; from hermes_cli.plugins import PluginContext, PluginManager; from plugins.plugin_storage import plugin_db; from gateway.run import GatewayRunner; from plugins.platforms.telegram.adapter import TelegramAdapter'
+      - name: Mini App and real Web Crypto interoperability tests
+        working-directory: plugin
+        run: node --test tests/web/*.test.mjs
       - name: Host contract suite (no host skips)
         working-directory: plugin
         env:
           HERMES_CONTRACT: '1'
-        run: python -m unittest discover -s tests -v
+        run: |
+          python - <<'PY'
+          import unittest
+          suite = unittest.defaultTestLoader.discover("tests")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if result.skipped:
+              print("Host gate rejects skipped tests:", result.skipped)
+          raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
+          PY
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Verify Docker context exclusions with inert sentinels
+        run: python tests/container/check_context.py
+      - name: Build pinned-host offline smoke image
+        run: docker build -f tests/container/Dockerfile -t mail-onboarding-smoke .
+      - name: Write and resume in distinct containers without network or published ports
+        run: python tests/container/run.py
 
   load-recovery:
     runs-on: ubuntu-latest
@@ -62,6 +117,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+      - name: Install plugin dependencies
+        run: python -m pip install -e .
       - name: Process interruption recovery
         run: python -m unittest tests.test_recovery -v
       - name: Fifty accounts and ten thousand events

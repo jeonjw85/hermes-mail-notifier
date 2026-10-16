@@ -16,7 +16,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.host = SetupHost(self.temp.name)
         self.account = Account(**account_data())
-        self.host.settings = replace(self.host.settings, accounts=(self.account,), max_pending=20, max_cached_bodies=20)
+        self.host.settings = replace(self.host.settings, accounts=(self.account,), ui_language="ko", max_pending=20, max_cached_bodies=20)
         self.host.passwords[self.account.id] = "test-only-secret"
         self.store = self.host.open_store()
         self.addCleanup(self.store.close)
@@ -70,3 +70,53 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(self.host.model_calls, 1)
         model = next(row for row in result["checks"] if row["name"] == "live_model")
         self.assertEqual(model["status"], "error")
+
+    def test_next_actions_are_bilingual_without_translating_commands(self):
+        cases = (("credential_unavailable", "Check the account", "hermes mail-notifier setup"),
+                 ("destination_unavailable", "Save the model", "Hermes"),
+                 ("cron_paused", "Repair cron", "hermes cron resume JOB_ID"),
+                 ("work_held", "Inspect pending work", "queue retry MAIL_ID"),
+                 ("uidvalidity_changed", "Check the mail server", "hermes mail-notifier reset ACCOUNT_ID"),
+                 ("already_running", "Wait for", ""),
+                 ("no_accounts", "Connect an account", "hermes mail-notifier accounts add"),
+                 ("not_run_yet", "Run the first check", "hermes mail-notifier check"),
+                 ("unknown_failure", "Check the status", "hermes mail-notifier doctor --json"))
+        for code, english, command in cases:
+            with self.subTest(code=code):
+                en = self.module.next_action(code, language="en")
+                ko = self.module.next_action(code)
+                self.assertIn(english, en)
+                self.assertNotEqual(en, ko)
+                self.assertIn(command, en)
+                self.assertIn(command, ko)
+                self.assertEqual(self.module.next_action(code, language="fr"), en)
+
+    def test_guidance_uses_ui_language_but_test_notification_uses_summary_language(self):
+        self.host.settings = replace(self.host.settings, ui_language="en", language="ko")
+        result = self.module.diagnose(self.host, live=True, mailbox_factory=lambda *a, **kw: FakeMailbox(self.account))
+        row = next(row for row in result["checks"] if row["code"] == "not_run_yet")
+        self.assertIn("Run the first check", row["next_action"])
+        self.assertIn("진단", self.host.deliveries[0][1])
+        self.host.settings = replace(self.host.settings, ui_language="ko", language="en")
+        captured = []
+        def complete(payload):
+            captured.append(payload)
+            return self.host.classification
+        self.host.complete_structured = complete
+        result = self.module.diagnose(self.host, live=True, mailbox_factory=lambda *a, **kw: FakeMailbox(self.account))
+        row = next(row for row in result["checks"] if row["code"] == "not_run_yet")
+        self.assertIn("최초 확인", row["next_action"])
+        self.assertEqual(self.host.deliveries[-1][1], "Mail notification diagnostic test · No actual email content is included.")
+        self.assertIn("Please reply", captured[0]["input"][0]["text"])
+        self.assertIn("in this language: en.", captured[0]["instructions"])
+
+    def test_automatic_or_unavailable_ui_language_falls_back_to_english_guidance(self):
+        self.host.settings = replace(self.host.settings, ui_language="")
+        result = self.module.diagnose(self.host)
+        row = next(row for row in result["checks"] if row["code"] == "not_run_yet")
+        self.assertIn("Run the first check", row["next_action"])
+        self.host.load_settings = lambda: (_ for _ in ()).throw(HostError("invalid_settings"))
+        result = self.module.diagnose(self.host)
+        row = next(row for row in result["checks"] if row["name"] == "settings")
+        self.assertEqual(row["code"], "invalid_settings")
+        self.assertIn("Check the account", row["next_action"])

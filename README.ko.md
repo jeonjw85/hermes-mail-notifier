@@ -379,13 +379,18 @@ Hermes 대화에서도 `mail_notifier_check`, `mail_notifier_status` 도구 사�
 | `credential_save_failed` | 해당 프로필의 자격증명 저장 권한과 관리 정책 |
 | `credentials_not_reloadable` | 환경변수에만 있는 모델과 Telegram 인증을 해당 프로필의 Hermes 설정 또는 재로드 가능한 비밀정보 소스로 구성 |
 | `credential_reload_check_failed` | 현재 Hermes의 인증 로더와 비밀정보 소스가 새 프로세스에서도 동작하는지 확인 |
-| `model_unavailable` | 현재 프로필의 모델 설정, 인증, 연결 확인. 설정 검사와 `doctor --live`가 인증 재로드·목적지 오류와 구분해 표시 |
+| `model_not_configured` | 이 프로필에 모델 제공자가 없음 — `hermes setup` 또는 `hermes model` |
+| `model_auth_failed` | 제공자는 설정되었으나 자격증명이 없거나 거부됨 — `hermes auth`, 또는 해당 제공자의 API 키 저장 |
+| `model_out_of_credits` | 크레딧·쿼터 소진 — 결제 확인 또는 `hermes model`로 전환 |
+| `model_rate_limited` | 일시적 429 또는 풀 쿨다운 — 리셋 대기 또는 `hermes auth add` |
+| `model_not_found` | 설정된 모델 이름을 그 제공자가 제공하지 않음 — `hermes model` |
+| `model_unavailable` | 위 어느 것도 아닌 모델 실패. 설정 검사와 `doctor --live`가 인증 재로드·목적지 오류와 구분해 표시 |
+| `incompatible_hermes` / `incompatible_hermes_onboarding` | 설치된 Hermes에 이 버전이 요구하는 플러그인 API가 없음 — 플러그인과 호스트 버전을 맞춤 |
 | `invalid_model_output` | 모델 응답이 규격에 맞지 않으면 재시도, 5회 누적 시 원문 확인 알림 |
 | `delivery_failed` / `delivery_unverified` | Telegram 연결과 목적지, Hermes 전송 결과 확인 |
 | `cron_operation_failed` | `setup`의 확인 주기와 `hermes cron status` 확인 |
 | `uidvalidity_changed` | 메일함 확인 후 해당 계정만 `reset` |
 | `duplicate_owned_cron_jobs` | `hermes cron list`에서 중복된 플러그인 작업 정리 후 `setup` 재실행 |
-| `incompatible_hermes` | 위의 필수 플러그인 기능을 지원하는 Hermes로 업데이트 |
 
 발생한 모든 오류 코드는 복구 기록에 보존하며, 알 수 없는 값은 저장하지 않습니다. 확인 단계가 실패하면 `confirm` 또는 `retry_confirmation`과 함께 `awaiting_confirmation`으로 돌아가므로, 계정을 다시 입력하지 않고 보존된 초안을 재시도할 수 있습니다.
 

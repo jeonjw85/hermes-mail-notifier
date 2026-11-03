@@ -39,6 +39,13 @@ class ErrorCodeTests(unittest.TestCase):
                          "register these codes in OnboardingService's _ERRORS set, "
                          "otherwise they are stored as unexpected_error")
 
+    def test_codes_selected_from_a_table_are_also_registered(self):
+        # A raise site written as raise HostError(some_table[exc]) hides its
+        # codes from the scan above, so the tables get their own guard.
+        from mail_notifier.hermes_host import _MODEL_FAILURES
+        codes = {code for code, _phrases in _MODEL_FAILURES} | {"model_unavailable"}
+        self.assertEqual(codes - self.onboarding._ERRORS, set())
+
     def test_unknown_codes_are_still_never_persisted_raw(self):
         self.assertNotIn("unexpected_error", self.onboarding._ERRORS)
         for value in ("private_secret_value", "", "UPPER", "with space", "x" * 200, None):

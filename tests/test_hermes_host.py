@@ -155,6 +155,58 @@ class HermesHostTests(unittest.TestCase):
             self.host.complete_structured({})
         self.assertNotIn("private", str(caught.exception))
 
+    def test_host_api_mismatch_is_not_reported_as_a_model_failure(self):
+        # The plugin was written against one host revision. A host that lacks
+        # ctx.llm.complete_structured, or that moved a keyword, raises TypeError
+        # — which the catch-all used to report as "model_unavailable", sending
+        # the user to hunt a model problem that does not exist.
+        self.ctx.llm = types.SimpleNamespace()
+        with self.assertRaises(self.module.HostError) as caught:
+            self.host.complete_structured({"instructions": "x", "input": []})
+        self.assertEqual(caught.exception.code, "incompatible_hermes")
+
+        # A real older signature: no timeout / max_tokens / purpose keyword.
+        def older_host_api(*, instructions, input, json_schema=None, schema_name=None):
+            return None
+
+        self.ctx.llm = types.SimpleNamespace(complete_structured=older_host_api)
+        with self.assertRaises(self.module.HostError) as caught:
+            self.host.complete_structured({"instructions": "x", "input": []})
+        self.assertEqual(caught.exception.code, "incompatible_hermes")
+        self.assertNotIn("purpose", str(caught.exception))
+
+    def test_a_type_error_inside_the_host_is_still_a_model_failure(self):
+        # Only a call-boundary rejection means "wrong plugin for this host"; a
+        # TypeError raised deeper is the host's own runtime fault.
+        def broken_payload(**kwargs):
+            raise TypeError("provider returned an unexpected shape")
+
+        self.ctx.llm = types.SimpleNamespace(complete_structured=broken_payload)
+        with self.assertRaises(self.module.ModelUnavailable) as caught:
+            self.host.complete_structured({"instructions": "x", "input": []})
+        self.assertEqual(caught.exception.code, "model_unavailable")
+
+    def test_model_failure_names_the_part_that_needs_fixing(self):
+        # "model_unavailable" cannot tell "not logged in" from "out of credits"
+        # from "model retired"; those need different fixes.
+        cases = {
+            "No LLM provider configured for task=None provider=auto. Run: hermes setup": "model_not_configured",
+            "Provider 'anthropic' is set in config.yaml but no credentials were found. Run `hermes auth add anthropic`": "model_auth_failed",
+            "Provider 'openrouter' is out of usable credentials: its only credential is exhausted (last error 402: Insufficient credits)": "model_out_of_credits",
+            "Provider 'nous' is set in config.yaml but its only credential is cooling down after a rate limit / quota error (429)": "model_rate_limited",
+            "Error code: 404 - model `claude-9` not found, use one of: claude-sonnet-4-5": "model_not_found",
+            "something private happened": "model_unavailable",
+        }
+        for message, code in cases.items():
+            with self.subTest(code=code):
+                self.ctx.llm.complete_structured.side_effect = RuntimeError(message)
+                with self.assertRaises(self.module.ModelUnavailable) as caught:
+                    self.host.complete_structured({})
+                self.assertEqual(caught.exception.code, code)
+                # Provider text, URLs and keys must never ride along.
+                self.assertNotIn("private", str(caught.exception))
+                self.assertNotIn("sk-", str(caught.exception))
+
     def test_usage_is_preserved_without_raw_model_text(self):
         self.ctx.llm.complete_structured.return_value = types.SimpleNamespace(
             parsed={"answer": 1}, text="private raw model output", provider="test-provider", model="test-model",

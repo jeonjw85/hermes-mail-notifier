@@ -240,13 +240,18 @@ The `mail_notifier_check` and `mail_notifier_status` tools are also available in
 | `credential_save_failed` | The profile's credential-storage permissions and management policy |
 | `credentials_not_reloadable` | Move environment-only model/Telegram credentials into the profile's Hermes configuration or a reloadable secret source |
 | `credential_reload_check_failed` | Verify that the Hermes credential loader and secret source work in a fresh process |
-| `model_unavailable` | The current profile's model configuration, credentials, and connectivity. Setup checks and the `--live` doctor probe distinguish this from credential-reload and destination failures. |
+| `model_not_configured` | No provider selected in this profile — `hermes setup` or `hermes model` |
+| `model_auth_failed` | Provider set, credentials missing or rejected — `hermes auth`, or save that provider's API key |
+| `model_out_of_credits` | Quota or credits exhausted — check billing, or `hermes model` to switch |
+| `model_rate_limited` | Temporary 429 or pool cooldown — wait for the reset, or `hermes auth add` |
+| `model_not_found` | The configured model name is not served by that provider — `hermes model` |
+| `model_unavailable` | A model failure none of the above explains; doctor and its `--live` probe still separate it from credential-reload and destination faults |
+| `incompatible_hermes` / `incompatible_hermes_onboarding` | The installed Hermes lacks a plugin API this revision needs — update the plugin or the host so the revisions match |
 | `invalid_model_output` | Invalid model output is retried; five failures produce a review notification |
 | `delivery_failed` / `delivery_unverified` | Telegram connection, destination, and Hermes delivery result |
 | `cron_operation_failed` | The polling interval in `setup` and the output of `hermes cron status` |
 | `uidvalidity_changed` | Inspect the mailbox, then `reset` only the affected account |
 | `duplicate_owned_cron_jobs` | Remove duplicate plugin jobs shown by `hermes cron list`, then rerun `setup` |
-| `incompatible_hermes` | Update to a Hermes version supporting the required plugin features listed above |
 
 Every raised code is preserved in the recovery record; an unknown value is never stored. A failed confirmation returns to `awaiting_confirmation` with `confirm` or `retry_confirmation`, so the preserved draft can be retried without re-entering the account.
 

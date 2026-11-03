@@ -41,8 +41,49 @@ class DeliveryError(HostError):
 
 
 class ModelUnavailable(HostError):
-    def __init__(self, code="model_unavailable"):
-        super().__init__(code)
+    """A model call failed; the code names which part needs fixing.
+
+    The host raises the same ``AuxiliaryClientUnavailable`` for "no provider
+    configured", "this provider has no credentials", "the pool is out of
+    credits" and "the credential is cooling down", and providers surface
+    authentication and unknown-model errors through the same call. All of them
+    used to collapse into ``model_unavailable``, whose advice was to re-check
+    the provider — useless when the provider is fine and the login is not.
+
+    Distinct codes keep the existing machinery: the durable allowlist, the
+    grouped ``next_action`` guidance and the i18n table all key off codes.
+    """
+
+
+# Ordered: the first matching phrase wins. Keep the phrases terse and free of
+# provider response text; they only select a code and are never shown.
+_MODEL_FAILURES = (
+    ("model_not_configured", ("no llm provider configured", "no provider available", "run: hermes setup")),
+    ("model_auth_failed", ("no credentials were found", "not logged into", "hermes auth", "re-authenticate",
+                           "invalid api key", "authentication failed", "401")),
+    ("model_out_of_credits", ("out of usable credentials", "insufficient credits", "exhausted", "402")),
+    ("model_rate_limited", ("cooling down", "rate limit", "429")),
+    ("model_not_found", ("not found, use one of", "does not exist", "404")),
+)
+
+
+def model_failure(exc) -> str:
+    """Pick the code for a failed model call without copying provider text."""
+    body = str(exc).lower()
+    for code, phrases in _MODEL_FAILURES:
+        if any(phrase in body for phrase in phrases):
+            return code
+    return "model_unavailable"
+
+
+def _call_boundary_error(exc) -> bool:
+    """True when a TypeError came from the call itself, not from inside the host.
+
+    A wrong keyword or arity fails before the callee frame exists, so its
+    traceback holds only the calling frame. A TypeError raised inside the host
+    or provider carries that deeper frame and is a real runtime fault.
+    """
+    return isinstance(exc, TypeError) and exc.__traceback__ is not None and exc.__traceback__.tb_next is None
 
 
 class HermesHost:
@@ -159,18 +200,27 @@ class HermesHost:
             raise HostError("setup_storage_unavailable") from None
 
     def complete_structured(self, payload: dict, *, timeout=45) -> ModelReply:
+        call = getattr(getattr(self.ctx, "llm", None), "complete_structured", None)
+        if not callable(call):
+            # Missing facade: a host API change, not a model problem.
+            raise HostError("incompatible_hermes")
         try:
-            result = self.ctx.llm.complete_structured(
+            result: object = call(
                 **payload, timeout=timeout, max_tokens=1800, purpose="mail-notifier-triage",
             )
             usage = getattr(result, "usage", None)
             values = {name: getattr(usage, name, None) for name in
                       ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd")}
-            return ModelReply(result.parsed, values, getattr(result, "provider", ""), getattr(result, "model", ""))
+            return ModelReply(getattr(result, "parsed", None), values,
+                              getattr(result, "provider", ""), getattr(result, "model", ""))
         except ValueError:
             raise TriageError("invalid_model_output") from None
-        except Exception:
-            raise ModelUnavailable() from None
+        except Exception as exc:
+            if _call_boundary_error(exc):
+                # The host rejected our keywords: this plugin does not match the
+                # installed Hermes. Never report it as a model failure.
+                raise HostError("incompatible_hermes") from None
+            raise ModelUnavailable(model_failure(exc)) from None
 
     def resolve_target(self, target: str) -> str:
         Settings(target=target)

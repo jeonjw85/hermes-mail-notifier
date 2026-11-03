@@ -45,6 +45,16 @@ def next_action(code, *, language="ko") -> str:
         return text("guidance.credentials", language)
     if code in {"model_unavailable", "invalid_model_output"}:
         return text("guidance.model", language)
+    if code == "model_not_configured":
+        return text("guidance.model_not_configured", language)
+    if code == "model_auth_failed":
+        return text("guidance.model_auth_failed", language)
+    if code == "model_out_of_credits":
+        return text("guidance.model_out_of_credits", language)
+    if code == "model_rate_limited":
+        return text("guidance.model_rate_limited", language)
+    if code == "model_not_found":
+        return text("guidance.model_not_found", language)
     if code.startswith("cron_"):
         return text("guidance.cron", language)
     if code in {"queue_full", "cache_full", "work_held", "queue_scope_required", "pending_mail_not_found"}:

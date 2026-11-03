@@ -60,6 +60,18 @@ def _connection(account):
     return account.provider, account.username, account.mailbox
 
 
+def repair_step(steps) -> str:
+    """Pick the one unfinished step; shared by CLI, Telegram and diagnostics."""
+    if "cron" in steps:
+        return "test_delivery"
+    return "cron" if "settings_fingerprint" in steps else "settings"
+
+
+def is_disable_only_preview(preview) -> bool:
+    """A disable-only change runs no model, reload or delivery checks."""
+    return isinstance(preview, dict) and preview.get("activation_checks") == "not_run_disable_only"
+
+
 @dataclass(repr=False)
 class _Secret:
     revision: int
@@ -367,7 +379,7 @@ class OnboardingService:
             # than a dead end: the drafts and its evidence are preserved.
             result["next_action"] = "retry_confirmation" if "error_code" in steps else "confirm"
         elif draft.state == "repair_required":
-            result["next_action"] = "test_delivery" if "cron" in steps else "cron" if "settings_fingerprint" in steps else "settings"
+            result["next_action"] = repair_step(steps)
         return result
 
     def _failure(self, draft, exc, *, state):

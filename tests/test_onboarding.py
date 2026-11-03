@@ -54,6 +54,35 @@ class OnboardingTests(unittest.TestCase):
     def commit(self, draft, **kwargs):
         return self.service.commit(draft.id, draft.owner, draft.revision, **kwargs)
 
+    def test_provider_choices_come_from_the_validated_settings_catalog(self):
+        from mail_notifier import telegram_views
+        from mail_notifier.config import PROVIDERS
+        self.assertEqual(tuple(PROVIDERS), ("naver", "daum", "gmail"))
+        self.assertEqual(tuple(telegram_views.PROVIDER_ORDER), tuple(PROVIDERS))
+
+    def test_repair_step_is_selected_by_one_rule_for_every_surface(self):
+        draft = self.validated()
+        # Unpublished work restarts at settings; published work retries cron,
+        # and a recorded cron only needs the test delivery retried.
+        self.assertEqual(self.module.repair_step({}), "settings")
+        self.assertEqual(self.module.repair_step({"settings_fingerprint": "a" * 64}), "cron")
+        self.assertEqual(self.module.repair_step({"settings_fingerprint": "a" * 64, "cron": {"job_id": "j"}}),
+                         "test_delivery")
+        result = self.commit(draft)
+        self.assertEqual(result["state"], "completed")
+        # Every surface must agree with the service's own next_action.
+        for steps, expected in (({}, "settings"),
+                                ({"settings_fingerprint": "a" * 64}, "cron"),
+                                ({"settings_fingerprint": "a" * 64, "cron": {"job_id": "j"}}, "test_delivery")):
+            with self.subTest(steps=steps):
+                self.assertEqual(self.module.repair_step(steps), expected)
+
+    def test_disable_only_is_detected_by_a_named_predicate_everywhere(self):
+        self.assertTrue(hasattr(self.module, "is_disable_only_preview"))
+        self.assertFalse(self.module.is_disable_only_preview({"activation_checks": "passed"}))
+        self.assertFalse(self.module.is_disable_only_preview({}))
+        self.assertTrue(self.module.is_disable_only_preview({"activation_checks": "not_run_disable_only"}))
+
     def test_failed_activation_check_keeps_the_specific_code_and_next_step(self):
         draft = self.validated()
         self.host.complete_structured = lambda *a, **kw: (_ for _ in ()).throw(HostError("model_unavailable"))

@@ -24,7 +24,8 @@ CLAUDE.md
 GEMINI.md
 .omo/
 .superpowers/
-docs/
+docs/superpowers/
+docs/*.tmp
 
 # macOS
 .DS_Store

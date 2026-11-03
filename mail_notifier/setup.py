@@ -12,7 +12,7 @@ from .diagnostics import next_action
 from .hermes_host import HostError
 from .i18n import resolve_ui_language, text
 from .imap_client import ImapMailbox
-from .onboarding import OnboardingService
+from .onboarding import OnboardingService, is_disable_only_preview, repair_step
 from .onboarding_auth import SetupOwner
 from .policy import POLICY_VERSION
 from .service import error_code
@@ -153,13 +153,13 @@ class _Terminal:
 
     def preview(self):
         preview = self.service.preview(self.draft.id, self.draft.owner)
-        self.say("setup.disable_only" if preview.get("activation_checks") == "not_run_disable_only" else "setup.preview")
+        self.say("setup.disable_only" if is_disable_only_preview(preview) else "setup.preview")
         print(json.dumps(preview, ensure_ascii=False, indent=2))
         return preview
 
     def result(self, result):
         if result["state"] == "completed":
-            if result.get("activation_checks") == "not_run_disable_only":
+            if is_disable_only_preview(result):
                 self.say("telegram.disabled_saved")
                 return 0
             self.say("setup.completed", job=result.get("cron_job_id") or text("status.none", self.language))
@@ -186,7 +186,7 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
         draft = service.start(SetupOwner(str(host.home()), "cli"), detected_language=language)
         terminal = _Terminal(host, service, draft, read, read_secret, language)
         terminal.say("setup.title")
-        disable_only = service.preview(draft.id, draft.owner).get("activation_checks") == "not_run_disable_only"
+        disable_only = is_disable_only_preview(service.preview(draft.id, draft.owner))
         if draft.state == "scheduled" and (draft.steps.get("test_delivery", {}).get("message_id") or disable_only):
             preview = terminal.preview()
             if not disable_only and terminal.yes("setup.resume"):
@@ -200,7 +200,7 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
         elif draft.state in {"committing", "repair_required", "scheduled"}:
             preview = terminal.preview()
             if terminal.yes("setup.repair"):
-                step = "test_delivery" if "cron" in draft.steps else "cron" if "settings_fingerprint" in draft.steps else "settings"
+                step = repair_step(draft.steps)
                 return terminal.result(service.repair(draft.id, draft.owner, draft.revision, step=step))
             if not preview.get("can_handoff_delivery"):
                 return terminal.result(preview)

@@ -3,9 +3,10 @@
 import secrets
 import time
 
-from .config import settings_fingerprint
+from .config import PROVIDERS, settings_fingerprint
 from .hermes_host import HostError
 from .i18n import resolve_ui_language, text
+from .onboarding import repair_step
 from .onboarding_auth import _shared, owner_key
 
 
@@ -61,6 +62,9 @@ def take_action(token, owner):
         del _ui()["actions"][token]
         return record
 
+
+# Presentation order only; the validated catalog in config owns the values.
+PROVIDER_ORDER = tuple(PROVIDERS)
 
 EDIT_SETTINGS = ("important_senders", "ignored_senders", "always_notify_senders", "important_keywords", "importance_instructions")
 
@@ -176,7 +180,7 @@ def panel(draft, settings, *, language: str, page: int = 0, change_page: int = 0
             else:
                 add("repair", "repair", step="test_delivery")
         else:
-            step = "test_delivery" if "cron" in draft.steps else "cron" if "settings_fingerprint" in draft.steps else "settings"
+            step = repair_step(draft.steps)
             add("repair", "repair", step=step)
         if can_handoff_delivery:
             view["text"] += "\n" + text("setup.unfinished_delivery", language)
@@ -235,7 +239,7 @@ def panel(draft, settings, *, language: str, page: int = 0, change_page: int = 0
         add("disable" if account.enabled else "enable", "disable" if account.enabled else "enable")
     elif section == "connection_provider":
         view["text"] += text("setup.identity_changed", language)
-        for provider in ("naver", "daum", "gmail"):
+        for provider in PROVIDER_ORDER:
             view["buttons"].append(button(draft, text("telegram." + provider, language), "provider", provider=provider))
     elif section in {"settings", "schedule", "language", "ui_language", "policy", "recovery"}:
         view["text"] += _settings(candidate, language, page)
@@ -277,7 +281,7 @@ def panel(draft, settings, *, language: str, page: int = 0, change_page: int = 0
             add("back", "back")
     else:
         view["text"] += text("telegram.provider", language)
-        for provider in ("naver", "daum", "gmail"):
+        for provider in PROVIDER_ORDER:
             view["buttons"].append(button(draft, text("telegram." + provider, language), "provider", provider=provider))
     if section not in {"account", "connection_provider"}:
         for locale, label in (("ko", "한국어"), ("en", "English")):

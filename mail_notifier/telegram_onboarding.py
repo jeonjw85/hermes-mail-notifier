@@ -19,7 +19,7 @@ from .credential_session import CredentialBinding, CredentialSessions, credentia
 from .hermes_host import HermesHost, HostError
 from .i18n import resolve_ui_language, text
 from .imap_client import ImapMailbox
-from .onboarding import OnboardingService
+from .onboarding import OnboardingService, is_disable_only_preview
 from .onboarding_auth import NativeInput, OriginProofs, _shared, acquire_broker, owner_key
 from .onboarding_runtime import OnboardingRuntime, bind_operation, check_active
 from .service import error_code, get_status
@@ -149,7 +149,7 @@ class TelegramOnboarding:
                              resume_confirmation=resume_confirmation, status=status, footer=footer,
                              current_fingerprint=preview.get("current_settings_fingerprint"),
                              can_handoff_delivery=preview.get("can_handoff_delivery", False),
-                             disable_only=preview.get("activation_checks") == "not_run_disable_only")
+                             disable_only=is_disable_only_preview(preview))
         result["completed_steps"] = preview["completed_steps"]
         result["text"] = views.bounded(result["text"], 3500)
         with _shared().lock:

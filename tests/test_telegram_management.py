@@ -197,6 +197,20 @@ class TelegramManagementTests(unittest.IsolatedAsyncioTestCase):
             await self.act(preview, "confirm")
             self.assertEqual(getattr(self.host.settings, field), "" if field == "importance_instructions" else ())
 
+    async def test_rejected_sender_list_keeps_the_prompt_and_a_corrected_reply_proceeds(self):
+        self.seed()
+        view = await self.act(await self.send("start"), "menu", menu="policy")
+        prompt = await self.act(view, "input", field="important_senders")
+        rejected = await self.edit_text(prompt, "boss@example.com, 김사장")
+        self.assertEqual(rejected["state"], "draft")
+        self.assertEqual(rejected["input_field"], "important_senders")
+        self.assertNotIn("Could not finish", rejected["text"])
+        self.assertEqual(self.host.settings.important_senders, ())
+        preview = await self.edit_text(rejected, "boss@example.com")
+        self.assertEqual(preview["state"], "awaiting_confirmation")
+        await self.act(preview, "confirm")
+        self.assertEqual(self.host.settings.important_senders, ("boss@example.com",))
+
     async def test_oversized_input_is_not_truncated_or_saved_and_prompt_can_be_retried(self):
         self.seed(importance_instructions="existing" * 10000)
         existing = self.host.settings.importance_instructions

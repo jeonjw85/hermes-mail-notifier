@@ -207,6 +207,17 @@ class TelegramOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.schedule_calls, 1)
         self.assertEqual(self.host.model_calls, 1)
 
+    async def test_bare_login_id_is_accepted_and_rejected_input_keeps_the_prompt(self):
+        view = await self.press(await self.send("start"), "Naver")
+        await self.controller.bind_prompt(self.receipt, view, "501")
+        rejected = await self.send("reply", json.dumps({"prompt_message_id": "501", "text": "   "}))
+        self.assertEqual(rejected["state"], "draft")
+        self.assertEqual(rejected["input_field"], "username")
+        self.assertNotIn("Could not finish", rejected["text"])
+        await self.controller.bind_prompt(self.receipt, rejected, "502")
+        accepted = await self.send("reply", json.dumps({"prompt_message_id": "502", "text": "myid"}))
+        self.assertEqual(accepted["state"], "awaiting_secret")
+
     async def test_existing_settings_are_not_retargeted_or_translated_by_detected_locale(self):
         self.host.settings = Settings(target="telegram:222:3", language="fr", schedule="every 10m", max_fetches=3)
         view = await self.press(await self.send("start", language="ko-KR"), "English")

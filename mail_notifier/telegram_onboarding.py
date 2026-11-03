@@ -14,7 +14,7 @@ import time
 from contextlib import closing
 from collections.abc import Coroutine
 
-from .config import settings_fingerprint
+from .config import ConfigError, settings_fingerprint
 from .credential_session import CredentialBinding, CredentialSessions, credential_url
 from .hermes_host import HermesHost, HostError
 from .i18n import resolve_ui_language, text
@@ -25,6 +25,17 @@ from .onboarding_runtime import OnboardingRuntime, bind_operation, check_active
 from .service import error_code, get_status
 from .telegram_gateway import admit_native, native_input, observe_native, on_admission
 from . import telegram_views as views
+
+
+_EMAIL = re.compile(r"[^\s@\x00-\x1f]{1,128}@[^\s@\x00-\x1f]{1,128}\.[^\s@\x00-\x1f]{1,63}")
+_LOGIN_ID = re.compile(r"[^\s@\x00-\x1f]{1,254}")
+_INPUT_ERRORS = {"invalid_settings", "account_already_exists_use_edit"}
+
+
+def _valid_login(value):
+    # The CLI and config accept a bare login ID (Naver/Daum) as well as an
+    # address; only structurally hopeless values are rejected before IMAP.
+    return len(value) <= 254 and bool((_EMAIL if "@" in value else _LOGIN_ID).fullmatch(value))
 
 
 def _text_parts(value):
@@ -121,6 +132,13 @@ class TelegramOnboarding:
         resource.service.expire()
         with closing(resource.host.open_setup_store()) as store:
             return store.get(draft_id, owner)
+
+    def _input_error(self, resource, draft, owner, code="invalid_settings"):
+        """Re-show the bound input prompt; the draft and its binding are unchanged."""
+        view = self._view(resource, draft)
+        view["text"] += "\n" + text("setup.input_error", view["language"], code=code)
+        view["error"] = code
+        return view
 
     def _view(self, resource, draft, *, page=0, change_page=0, resume_confirmation=False):
         preview = resource.service.preview(draft.id, draft.owner)
@@ -331,20 +349,28 @@ class TelegramOnboarding:
                 view = self._view(resource, draft)
                 view["text"] += "\n" + text("telegram.input_limit", view["language"])
                 return view
-            if field == "username" and (not re.fullmatch(r"[^\s@\x00-\x1f]{1,128}@[^\s@\x00-\x1f]{1,128}\.[^\s@\x00-\x1f]{1,63}", value) or len(value) > 254):
-                raise HostError("invalid_settings")
-            if field in views.EDIT_SETTINGS:
-                value = value if field == "importance_instructions" else tuple(v.strip() for v in re.split(r"[,\n]", value) if v.strip())
-                draft = service.change(draft.id, owner, draft.revision, action="settings", values={field: value})
-            elif field in {"label", "username", "mailbox"}:
-                values = {field: value}
-                if draft.form.get("account_id"):
-                    values["account_id"] = draft.form["account_id"]
+            if field == "username" and not _valid_login(value):
+                return self._input_error(resource, draft, owner)
+            try:
+                if field in views.EDIT_SETTINGS:
+                    value = value if field == "importance_instructions" else tuple(v.strip() for v in re.split(r"[,\n]", value) if v.strip())
+                    draft = service.change(draft.id, owner, draft.revision, action="settings", values={field: value})
+                elif field in {"label", "username", "mailbox"}:
+                    values = {field: value}
+                    if draft.form.get("account_id"):
+                        values["account_id"] = draft.form["account_id"]
+                    else:
+                        values.update(provider=draft.form["provider"], label=value.split("@", 1)[0])
+                    draft = service.change(draft.id, owner, draft.revision, action="edit" if "account_id" in values else "add", values=values)
                 else:
-                    values.update(provider=draft.form["provider"], label=value.split("@", 1)[0])
-                draft = service.change(draft.id, owner, draft.revision, action="edit" if "account_id" in values else "add", values=values)
-            else:
-                raise HostError("invalid_setup_action")
+                    raise HostError("invalid_setup_action")
+            except (ConfigError, HostError) as exc:
+                code = error_code(exc)
+                if code not in _INPUT_ERRORS:
+                    raise
+                # A rejected value is a field error, not a lost panel: keep the
+                # bound prompt so the same reply can be corrected in place.
+                return self._input_error(resource, draft, owner, code)
         elif item.kind == "web_app":
             wire = None
             try:

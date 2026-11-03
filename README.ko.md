@@ -387,6 +387,8 @@ Hermes 대화에서도 `mail_notifier_check`, `mail_notifier_status` 도구 사�
 | `duplicate_owned_cron_jobs` | `hermes cron list`에서 중복된 플러그인 작업 정리 후 `setup` 재실행 |
 | `incompatible_hermes` | 위의 필수 플러그인 기능을 지원하는 Hermes로 업데이트 |
 
+발생한 모든 오류 코드는 복구 기록에 보존하며, 알 수 없는 값은 저장하지 않습니다. 확인 단계가 실패하면 `confirm` 또는 `retry_confirmation`과 함께 `awaiting_confirmation`으로 돌아가므로, 계정을 다시 입력하지 않고 보존된 초안을 재시도할 수 있습니다.
+
 ## 저장 위치, 업데이트, 삭제
 
 현재 프로필의 `HERMES_HOME` 기준

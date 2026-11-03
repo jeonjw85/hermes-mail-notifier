@@ -54,6 +54,24 @@ class OnboardingTests(unittest.TestCase):
     def commit(self, draft, **kwargs):
         return self.service.commit(draft.id, draft.owner, draft.revision, **kwargs)
 
+    def test_failed_activation_check_keeps_the_specific_code_and_next_step(self):
+        draft = self.validated()
+        self.host.complete_structured = lambda *a, **kw: (_ for _ in ()).throw(HostError("model_unavailable"))
+        result = self.commit(draft)
+        self.assertEqual(result["state"], "awaiting_confirmation")
+        self.assertEqual(result["error"], "model_unavailable")
+        self.assertTrue(result.get("next_action"), "a failed confirmation must say what to do next")
+        self.assertEqual(self.stored(draft).steps["error_code"], "model_unavailable")
+
+    def test_codes_outside_the_activation_allowlist_are_not_masked(self):
+        draft = self.validated()
+        # A wrong app password is a user-fixable cause, not an unknown failure.
+        self.host.get_password = lambda account: (_ for _ in ()).throw(HostError("credential_unavailable"))
+        self.host.complete_structured = lambda *a, **kw: (_ for _ in ()).throw(HostError("interactive_terminal_required"))
+        result = self.commit(draft)
+        self.assertEqual(result["error"], "interactive_terminal_required")
+        self.assertEqual(self.stored(draft).steps["error_code"], "interactive_terminal_required")
+
     def test_confirmation_is_required_before_publication_and_snapshot_is_fresh(self):
         draft = self.validated()
         self.assertEqual(draft.state, "awaiting_confirmation")

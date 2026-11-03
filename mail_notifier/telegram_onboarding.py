@@ -14,7 +14,7 @@ import time
 from contextlib import closing
 from collections.abc import Coroutine
 
-from .config import ConfigError, settings_fingerprint
+from .config import ConfigError, settings_fingerprint, valid_login
 from .credential_session import CredentialBinding, CredentialSessions, credential_url
 from .hermes_host import HermesHost, HostError
 from .i18n import resolve_ui_language, text
@@ -27,15 +27,7 @@ from .telegram_gateway import admit_native, native_input, observe_native, on_adm
 from . import telegram_views as views
 
 
-_EMAIL = re.compile(r"[^\s@\x00-\x1f]{1,128}@[^\s@\x00-\x1f]{1,128}\.[^\s@\x00-\x1f]{1,63}")
-_LOGIN_ID = re.compile(r"[^\s@\x00-\x1f]{1,254}")
 _INPUT_ERRORS = {"invalid_settings", "account_already_exists_use_edit"}
-
-
-def _valid_login(value):
-    # The CLI and config accept a bare login ID (Naver/Daum) as well as an
-    # address; only structurally hopeless values are rejected before IMAP.
-    return len(value) <= 254 and bool((_EMAIL if "@" in value else _LOGIN_ID).fullmatch(value))
 
 
 def _text_parts(value):
@@ -349,7 +341,7 @@ class TelegramOnboarding:
                 view = self._view(resource, draft)
                 view["text"] += "\n" + text("telegram.input_limit", view["language"])
                 return view
-            if field == "username" and not _valid_login(value):
+            if field == "username" and not valid_login(value):
                 return self._input_error(resource, draft, owner)
             try:
                 if field in views.EDIT_SETTINGS:

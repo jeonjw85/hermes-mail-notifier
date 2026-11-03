@@ -240,17 +240,30 @@ class CredentialSessions:
             self.reject(binding.owner)
 
 
+def parse_page_url(base_url: str):
+    """Return the parsed operator page, or raise ValueError for any unusable URL.
+
+    This is the single source of truth: the secure-input button, the CLI and
+    doctor must accept and reject exactly the same URLs, or doctor reports a
+    page as usable that the button cannot open.
+    """
+    if not isinstance(base_url, str) or not base_url:
+        raise ValueError()
+    if any(char.isspace() or unicodedata.category(char) == "Cc" for char in base_url):
+        raise ValueError()
+    parsed = urlsplit(base_url)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.fragment or "#" in base_url):
+        raise ValueError()
+    parsed.port  # Reject malformed/out-of-range configured ports.
+    return parsed
+
+
 def credential_url(base_url: str, challenge: CredentialChallenge, *, provider: str,
                    account_label: str, ui_language: str) -> str:
     """Build public fragment context from a configured (not chat/model) base."""
     try:
-        if not isinstance(base_url, str) or any(char.isspace() or unicodedata.category(char) == "Cc" for char in base_url):
-            raise ValueError()
-        parsed = urlsplit(base_url)
-        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
-                or parsed.password is not None or parsed.fragment or "#" in base_url):
-            raise ValueError()
-        parsed.port  # Reject malformed/out-of-range configured ports.
+        parsed = parse_page_url(base_url)
         fragment = urlencode({"v": "1", "session_id": challenge.session_id, "expires_at": challenge.expires_at,
                               "provider": provider, "account_label": account_label, "ui_language": ui_language,
                               "server_public_key": challenge.server_public_key, "binding": challenge.binding})

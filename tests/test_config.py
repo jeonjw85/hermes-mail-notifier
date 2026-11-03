@@ -42,6 +42,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.important_keywords, ("계약",))
         self.assertEqual(self.config.load_settings(self.config.dump_settings(settings)), settings)
 
+    def test_login_identifier_shape_is_enforced_at_the_settings_boundary(self):
+        from tests.support import account_data
+        for value in ("me@example.com", "myid", "my.id-2_x@sub.example.co.kr", "김@example.com"):
+            with self.subTest(value=value):
+                self.assertEqual(self.config.Account(**account_data(username=value)).username, value)
+        for value in ("", "a b", "me@@x.com", "me@exa mple.com", "me@naver", "x" * 300,
+                      "me@example.com ", "myid\t", "id\x00", "@example.com", "me@"):
+            with self.subTest(value=value), self.assertRaises(self.config.ConfigError):
+                self.config.Account(**account_data(username=value))
+
     def test_limits_reject_bools_zero_and_unbounded_values(self):
         limits = {"max_run_seconds": (30, 240), "max_fetches": (1, 100),
                   "max_model_calls": (1, 100), "max_deliveries": (1, 100),

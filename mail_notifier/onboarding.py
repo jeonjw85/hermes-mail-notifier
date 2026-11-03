@@ -27,13 +27,33 @@ _TERMINAL = {"completed", "cancelled", "expired", "acknowledged"}
 _ACCOUNT_FIELDS = {"provider", "username", "label", "mailbox", "enabled"}
 _SETTINGS_FIELDS = {"schedule", "target", "language", "ui_language", "important_senders", "ignored_senders",
                     "always_notify_senders", "important_keywords", "importance_instructions"}
-_ERRORS = {"imap_authentication_failed", "imap_connection_failed", "imap_timeout", "imap_mailbox_unavailable",
-           "imap_invalid_uid_state", "credential_unavailable", "credential_save_failed", "settings_save_failed",
-           "credentials_not_reloadable", "credential_reload_check_failed", "destination_unavailable",
-           "incompatible_hermes", "hermes_executable_missing", "invalid_schedule", "invalid_settings",
-           "model_unavailable", "invalid_model_output", "delivery_failed", "delivery_unverified",
-           "cron_operation_failed", "cron_ownership_failed", "invalid_cron_response", "duplicate_owned_cron_jobs", "storage_failed",
-           "storage_unavailable", "setup_storage_unavailable", "already_running"}
+# Durable recovery evidence may only hold a code this plugin can raise; an
+# arbitrary string must never be persisted. The set is exhaustive and guarded
+# by tests/test_error_codes.py, which fails when a new code is raised without
+# being registered here. A short allowlist previously rewrote user-fixable
+# causes (a wrong app password, a missing terminal) into "unexpected_error".
+_ERRORS = {
+    "account_already_exists_use_edit", "account_not_found", "already_running",
+    "credential_crypto_unavailable", "credential_page_insecure", "credential_page_unavailable",
+    "credential_page_unreachable", "credential_reload_check_failed", "credential_save_failed",
+    "credential_unavailable", "credentials_not_reloadable",
+    "cron_operation_failed", "cron_ownership_failed",
+    "decision_not_found", "delivery_failed", "delivery_unverified", "destination_unavailable",
+    "duplicate_owned_cron_jobs", "feedback_not_found", "hermes_executable_missing",
+    "imap_authentication_failed", "imap_connection_failed", "imap_invalid_fetch_response",
+    "imap_invalid_uid_response", "imap_invalid_uid_state", "imap_mailbox_unavailable", "imap_timeout",
+    "incompatible_hermes", "incompatible_hermes_onboarding", "interactive_terminal_required",
+    "invalid_app_password", "invalid_credential_binding", "invalid_credential_submission",
+    "invalid_credential_url", "invalid_cron_response", "invalid_enabled", "invalid_feedback",
+    "invalid_feedback_action", "invalid_limit", "invalid_live_option", "invalid_model_output",
+    "invalid_policy_changes", "invalid_queue_action", "invalid_schedule", "invalid_settings",
+    "invalid_setup_action", "invalid_setup_draft", "invalid_target", "invalid_work_transition",
+    "mail_not_found", "model_unavailable", "notification_not_ready", "pending_mail_not_found",
+    "profile_unavailable", "queue_scope_required", "settings_save_failed", "setup_already_committing",
+    "setup_changed_retry", "setup_confirmation_required", "setup_limit_reached", "setup_not_found",
+    "setup_queue_full", "setup_storage_unavailable", "setup_work_cancelled",
+    "storage_failed", "storage_unavailable", "uidvalidity_changed", "unsupported_setup_schema",
+}
 
 
 def _connection(account):
@@ -342,6 +362,10 @@ class OnboardingService:
             result["next_action"] = "acknowledge_restart"
         elif draft.state in {"needs_secret", "awaiting_secret"}:
             result["next_action"] = "enter_password"
+        elif draft.state == "awaiting_confirmation":
+            # A failed activation check returns to the same confirmation rather
+            # than a dead end: the drafts and its evidence are preserved.
+            result["next_action"] = "retry_confirmation" if "error_code" in steps else "confirm"
         elif draft.state == "repair_required":
             result["next_action"] = "test_delivery" if "cron" in steps else "cron" if "settings_fingerprint" in steps else "settings"
         return result

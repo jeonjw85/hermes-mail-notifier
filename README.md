@@ -248,6 +248,8 @@ The `mail_notifier_check` and `mail_notifier_status` tools are also available in
 | `duplicate_owned_cron_jobs` | Remove duplicate plugin jobs shown by `hermes cron list`, then rerun `setup` |
 | `incompatible_hermes` | Update to a Hermes version supporting the required plugin features listed above |
 
+Every raised code is preserved in the recovery record; an unknown value is never stored. A failed confirmation returns to `awaiting_confirmation` with `confirm` or `retry_confirmation`, so the preserved draft can be retried without re-entering the account.
+
 ## Storage, Updates, and Removal
 
 Paths are relative to the current profile's `HERMES_HOME`:

@@ -110,6 +110,44 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("doctor --live", row["next_action"])
         self.assertFalse(result["success"])
 
+    def test_every_registered_code_has_specific_guidance(self):
+        from mail_notifier.onboarding import _ERRORS
+        generic = self.module.next_action("__unknown__", language="en")
+        for code in sorted(_ERRORS):
+            with self.subTest(code=code):
+                guidance = self.module.next_action(code, language="en")
+                self.assertTrue(guidance)
+                self.assertNotEqual(guidance, generic, f"{code} has no specific guidance")
+
+    def test_guidance_groups_are_bilingual_and_keep_commands(self):
+        cases = (
+            ("invalid_app_password", "password", "hermes mail-notifier setup"),
+            ("interactive_terminal_required", "terminal", "hermes mail-notifier setup"),
+            ("imap_timeout", "IMAP", "doctor --live"),
+            ("storage_unavailable", "storage", "hermes mail-notifier doctor"),
+            ("setup_changed_retry", "current", "/mail"),
+            ("setup_already_committing", "current", "/mail"),
+            ("incompatible_hermes_onboarding", "Hermes", "update"),
+            ("mail_not_found", "mail ID", "history"),
+        )
+        for code, english, command in cases:
+            with self.subTest(code=code):
+                en = self.module.next_action(code, language="en")
+                ko = self.module.next_action(code, language="ko")
+                self.assertIn(english.casefold(), en.casefold())
+                self.assertIn(command.casefold(), en.casefold())
+                self.assertNotEqual(en, ko)
+
+    def test_page_check_matches_the_url_the_secure_button_would_build(self):
+        # doctor must never report ok for a page the secure-input button rejects.
+        self.host.credential_page_url = lambda: "https://exa mple.com/x"
+        row = next(item for item in self.module.diagnose(self.host)["checks"] if item["name"] == "credential_page")
+        self.assertEqual(row["status"], "warning")
+        self.assertEqual(row["code"], "credential_page_insecure")
+        self.host.credential_page_url = lambda: "https://example.com:99999/x"
+        row = next(item for item in self.module.diagnose(self.host)["checks"] if item["name"] == "credential_page")
+        self.assertEqual(row["code"], "credential_page_insecure")
+
     def test_next_actions_are_bilingual_without_translating_commands(self):
         cases = (("credential_unavailable", "Check the account", "hermes mail-notifier setup"),
                  ("model_unavailable", "model", "hermes mail-notifier doctor --live --json"),

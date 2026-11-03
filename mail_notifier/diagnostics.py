@@ -2,8 +2,8 @@
 
 import urllib.request
 from dataclasses import replace
-from urllib.parse import urlsplit
 
+from .credential_session import parse_page_url
 from .hermes_host import HostError
 from .i18n import resolve_ui_language, text
 from .imap_client import ImapMailbox
@@ -18,10 +18,10 @@ def _credential_page_check(url):
     """Validate the operator page locally; never fetch it here."""
     if not url:
         raise HostError("credential_page_unavailable")
-    parsed = urlsplit(url)
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
-            or parsed.password is not None or parsed.fragment or "#" in url):
-        raise HostError("credential_page_insecure")
+    try:
+        parse_page_url(url)
+    except (ValueError, TypeError):
+        raise HostError("credential_page_insecure") from None
     return url
 
 
@@ -57,6 +57,36 @@ def next_action(code, *, language="ko") -> str:
         return text("guidance.no_accounts", language)
     if code == "not_run_yet":
         return text("guidance.first_check", language)
+    if code in {"invalid_app_password", "credential_crypto_unavailable"}:
+        return text("guidance.app_password", language)
+    if code == "interactive_terminal_required":
+        return text("guidance.terminal", language)
+    if code in {"imap_connection_failed", "imap_timeout", "imap_invalid_fetch_response",
+                "imap_invalid_uid_response", "imap_invalid_uid_state"}:
+        return text("guidance.imap", language)
+    if code in {"credential_save_failed", "settings_save_failed"}:
+        return text("guidance.save_failed", language)
+    if code in {"storage_failed", "storage_unavailable", "setup_storage_unavailable", "unsupported_setup_schema"}:
+        return text("guidance.storage", language)
+    if code in {"delivery_failed", "delivery_unverified"}:
+        return text("guidance.delivery", language)
+    if code in {"incompatible_hermes", "incompatible_hermes_onboarding", "hermes_executable_missing", "profile_unavailable"}:
+        return text("guidance.incompatible", language)
+    if code in {"setup_changed_retry", "setup_not_found", "setup_confirmation_required",
+                "setup_already_committing", "setup_work_cancelled", "notification_not_ready"}:
+        return text("guidance.stale_setup", language)
+    if code in {"setup_limit_reached", "setup_queue_full"}:
+        return text("guidance.setup_busy", language)
+    if code in {"account_already_exists_use_edit", "account_not_found", "invalid_setup_action",
+                "invalid_setup_draft", "invalid_target", "invalid_schedule", "invalid_enabled"}:
+        return text("guidance.setup_input", language)
+    if code in {"mail_not_found", "decision_not_found", "feedback_not_found"}:
+        return text("guidance.not_found", language)
+    if code in {"invalid_feedback", "invalid_feedback_action", "invalid_policy_changes", "invalid_limit",
+                "invalid_queue_action", "invalid_work_transition", "invalid_credential_url",
+                "invalid_credential_binding", "invalid_credential_submission", "invalid_cron_response",
+                "duplicate_owned_cron_jobs", "cron_ownership_failed", "invalid_live_option"}:
+        return text("guidance.invalid_request", language)
     return text("guidance.default", language)
 
 

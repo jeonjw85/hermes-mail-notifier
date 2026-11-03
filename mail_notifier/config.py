@@ -36,6 +36,19 @@ def secret_name(account_id: str) -> str:
     return f"HERMES_MAIL_{account_id.upper()}_APP_PASSWORD"
 
 
+# A provider login is either a full address or a bare account ID (Naver and
+# Daum accept the latter). This is the single rule shared by the CLI, Telegram
+# and stored settings, so a value the wizard accepts can never fail on load.
+_EMAIL = re.compile(r"[^\s@\x00-\x1f]{1,128}@[^\s@\x00-\x1f]{1,128}\.[^\s@\x00-\x1f]{1,63}")
+_LOGIN_ID = re.compile(r"[^\s@\x00-\x1f]{1,254}")
+
+
+def valid_login(value) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 254:
+        return False
+    return bool((_EMAIL if "@" in value else _LOGIN_ID).fullmatch(value))
+
+
 @dataclass(frozen=True)
 class Account:
     id: str
@@ -55,6 +68,8 @@ class Account:
             value = _text(getattr(self, name), name)
             if any(ord(char) < 32 for char in value):
                 raise ConfigError(f"{name} must not contain control characters")
+        if not valid_login(self.username):
+            raise ConfigError("username must be an email address or a provider account ID")
         if type(self.enabled) is not bool:
             raise ConfigError("enabled must be a boolean")
 

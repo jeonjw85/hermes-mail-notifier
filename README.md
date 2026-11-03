@@ -240,7 +240,7 @@ The `mail_notifier_check` and `mail_notifier_status` tools are also available in
 | `credential_save_failed` | The profile's credential-storage permissions and management policy |
 | `credentials_not_reloadable` | Move environment-only model/Telegram credentials into the profile's Hermes configuration or a reloadable secret source |
 | `credential_reload_check_failed` | Verify that the Hermes credential loader and secret source work in a fresh process |
-| `model_unavailable` | The current profile's model configuration, credentials, and connectivity |
+| `model_unavailable` | The current profile's model configuration, credentials, and connectivity. Setup checks and the `--live` doctor probe distinguish this from credential-reload and destination failures. |
 | `invalid_model_output` | Invalid model output is retried; five failures produce a review notification |
 | `delivery_failed` / `delivery_unverified` | Telegram connection, destination, and Hermes delivery result |
 | `cron_operation_failed` | The polling interval in `setup` and the output of `hermes cron status` |

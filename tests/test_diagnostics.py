@@ -101,8 +101,19 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(probes[0][0], "https://dead.example/credential/")
         self.assertNotIn("dead.example", row["next_action"])
 
+    def test_live_model_failure_is_reported_with_a_model_specific_next_action(self):
+        self.host.complete_structured = lambda *a, **kw: (_ for _ in ()).throw(HostError("model_unavailable"))
+        result = self.module.diagnose(self.host, live=True, mailbox_factory=lambda *a, **kw: FakeMailbox(self.account))
+        row = next(item for item in result["checks"] if item["name"] == "live_model")
+        self.assertEqual(row["code"], "model_unavailable")
+        self.assertIn("model", row["next_action"])
+        self.assertIn("doctor --live", row["next_action"])
+        self.assertFalse(result["success"])
+
     def test_next_actions_are_bilingual_without_translating_commands(self):
         cases = (("credential_unavailable", "Check the account", "hermes mail-notifier setup"),
+                 ("model_unavailable", "model", "hermes mail-notifier doctor --live --json"),
+                 ("invalid_model_output", "model", "hermes mail-notifier doctor --live --json"),
                  ("destination_unavailable", "Save the model", "Hermes"),
                  ("cron_paused", "Repair cron", "hermes cron resume JOB_ID"),
                  ("work_held", "Inspect pending work", "queue retry MAIL_ID"),

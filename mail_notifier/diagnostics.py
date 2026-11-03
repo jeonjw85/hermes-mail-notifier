@@ -43,6 +43,8 @@ def next_action(code, *, language="ko") -> str:
         return text("guidance.account", language)
     if code in {"credentials_not_reloadable", "credential_reload_check_failed", "destination_unavailable"}:
         return text("guidance.credentials", language)
+    if code in {"model_unavailable", "invalid_model_output"}:
+        return text("guidance.model", language)
     if code.startswith("cron_"):
         return text("guidance.cron", language)
     if code in {"queue_full", "cache_full", "work_held", "queue_scope_required", "pending_mail_not_found"}:

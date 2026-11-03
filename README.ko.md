@@ -379,7 +379,7 @@ Hermes 대화에서도 `mail_notifier_check`, `mail_notifier_status` 도구 사�
 | `credential_save_failed` | 해당 프로필의 자격증명 저장 권한과 관리 정책 |
 | `credentials_not_reloadable` | 환경변수에만 있는 모델과 Telegram 인증을 해당 프로필의 Hermes 설정 또는 재로드 가능한 비밀정보 소스로 구성 |
 | `credential_reload_check_failed` | 현재 Hermes의 인증 로더와 비밀정보 소스가 새 프로세스에서도 동작하는지 확인 |
-| `model_unavailable` | 현재 프로필의 모델 설정, 인증, 연결 확인 |
+| `model_unavailable` | 현재 프로필의 모델 설정, 인증, 연결 확인. 설정 검사와 `doctor --live`가 인증 재로드·목적지 오류와 구분해 표시 |
 | `invalid_model_output` | 모델 응답이 규격에 맞지 않으면 재시도, 5회 누적 시 원문 확인 알림 |
 | `delivery_failed` / `delivery_unverified` | Telegram 연결과 목적지, Hermes 전송 결과 확인 |
 | `cron_operation_failed` | `setup`의 확인 주기와 `hermes cron status` 확인 |

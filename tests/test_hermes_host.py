@@ -156,35 +156,51 @@ class HermesHostTests(unittest.TestCase):
         self.assertNotIn("private", str(caught.exception))
 
     def test_host_api_mismatch_is_not_reported_as_a_model_failure(self):
-        # The plugin was written against one host revision. A host that lacks
-        # ctx.llm.complete_structured, or that moved a keyword, raises TypeError
-        # — which the catch-all used to report as "model_unavailable", sending
-        # the user to hunt a model problem that does not exist.
+        # A host that lacks both model methods is genuinely incompatible.
         self.ctx.llm = types.SimpleNamespace()
         with self.assertRaises(self.module.HostError) as caught:
             self.host.complete_structured({"instructions": "x", "input": []})
         self.assertEqual(caught.exception.code, "incompatible_hermes")
 
-        # A real older signature: no timeout / max_tokens / purpose keyword.
-        def older_host_api(*, instructions, input, json_schema=None, schema_name=None):
-            return None
+    def test_older_structured_signature_is_adapted_not_rejected(self):
+        # Optional keywords come and go between host revisions. Only ask for
+        # the ones the installed host actually accepts.
+        calls = {}
 
-        self.ctx.llm = types.SimpleNamespace(complete_structured=older_host_api)
-        with self.assertRaises(self.module.HostError) as caught:
+        def older(instructions, input, json_schema=None, schema_name=None):
+            calls["kwargs"] = {"instructions": instructions, "input": input}
+            return types.SimpleNamespace(parsed={"answer": 1}, usage=None, provider="p", model="m")
+
+        self.ctx.llm = types.SimpleNamespace(complete_structured=older)
+        self.assertEqual(self.host.complete_structured(
+            {"instructions": "x", "input": [], "json_schema": {}, "schema_name": "t"}).parsed, {"answer": 1})
+        self.assertEqual(calls["kwargs"]["instructions"], "x")
+
+    def test_host_without_structured_completion_uses_text_completion(self):
+        # A host exposing only ctx.llm.complete must still work: the plugin
+        # validates the schema itself, so it only needs the JSON text back.
+        sent = {}
+
+        def complete(messages, **kwargs):
+            sent["messages"] = messages
+            return types.SimpleNamespace(text='```json\n{"answer": 1}\n```', usage=None, provider="p", model="m")
+
+        self.ctx.llm = types.SimpleNamespace(complete=complete)
+        reply = self.host.complete_structured(
+            {"instructions": "classify", "input": [{"type": "text", "text": "body"}],
+             "json_schema": {"type": "object"}, "schema_name": "mail_triage"})
+        self.assertEqual(reply.parsed, {"answer": 1})
+        # The schema and instructions must reach the model in the fallback too.
+        rendered = str(sent["messages"])
+        self.assertIn("classify", rendered)
+        self.assertIn("body", rendered)
+
+    def test_text_fallback_reports_unparseable_output_as_invalid_model_output(self):
+        self.ctx.llm = types.SimpleNamespace(
+            complete=lambda messages, **kw: types.SimpleNamespace(text="not json at all"))
+        with self.assertRaises(self.module.TriageError) as caught:
             self.host.complete_structured({"instructions": "x", "input": []})
-        self.assertEqual(caught.exception.code, "incompatible_hermes")
-        self.assertNotIn("purpose", str(caught.exception))
-
-    def test_a_type_error_inside_the_host_is_still_a_model_failure(self):
-        # Only a call-boundary rejection means "wrong plugin for this host"; a
-        # TypeError raised deeper is the host's own runtime fault.
-        def broken_payload(**kwargs):
-            raise TypeError("provider returned an unexpected shape")
-
-        self.ctx.llm = types.SimpleNamespace(complete_structured=broken_payload)
-        with self.assertRaises(self.module.ModelUnavailable) as caught:
-            self.host.complete_structured({"instructions": "x", "input": []})
-        self.assertEqual(caught.exception.code, "model_unavailable")
+        self.assertEqual(caught.exception.code, "invalid_model_output")
 
     def test_model_failure_names_the_part_that_needs_fixing(self):
         # "model_unavailable" cannot tell "not logged in" from "out of credits"

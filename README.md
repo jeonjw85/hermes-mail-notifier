@@ -246,7 +246,7 @@ The `mail_notifier_check` and `mail_notifier_status` tools are also available in
 | `model_rate_limited` | Temporary 429 or pool cooldown — wait for the reset, or `hermes auth add` |
 | `model_not_found` | The configured model name is not served by that provider — `hermes model` |
 | `model_unavailable` | A model failure none of the above explains; doctor and its `--live` probe still separate it from credential-reload and destination faults |
-| `incompatible_hermes` / `incompatible_hermes_onboarding` | The installed Hermes lacks a plugin API this revision needs — update the plugin or the host so the revisions match |
+| `incompatible_hermes` / `incompatible_hermes_onboarding` | The installed Hermes exposes neither `complete_structured` nor `complete` on `ctx.llm` — the plugin LLM facade predates it; otherwise the plugin adapts to either method |
 | `invalid_model_output` | Invalid model output is retried; five failures produce a review notification |
 | `delivery_failed` / `delivery_unverified` | Telegram connection, destination, and Hermes delivery result |
 | `cron_operation_failed` | The polling interval in `setup` and the output of `hermes cron status` |

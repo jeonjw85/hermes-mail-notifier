@@ -385,7 +385,7 @@ Hermes 대화에서도 `mail_notifier_check`, `mail_notifier_status` 도구 사�
 | `model_rate_limited` | 일시적 429 또는 풀 쿨다운 — 리셋 대기 또는 `hermes auth add` |
 | `model_not_found` | 설정된 모델 이름을 그 제공자가 제공하지 않음 — `hermes model` |
 | `model_unavailable` | 위 어느 것도 아닌 모델 실패. 설정 검사와 `doctor --live`가 인증 재로드·목적지 오류와 구분해 표시 |
-| `incompatible_hermes` / `incompatible_hermes_onboarding` | 설치된 Hermes에 이 버전이 요구하는 플러그인 API가 없음 — 플러그인과 호스트 버전을 맞춤 |
+| `incompatible_hermes` / `incompatible_hermes_onboarding` | 설치된 Hermes의 `ctx.llm`에 `complete_structured`도 `complete`도 없음 — 플러그인 LLM 파사드 이전 버전. 둘 중 하나만 있으면 자동 적응 |
 | `invalid_model_output` | 모델 응답이 규격에 맞지 않으면 재시도, 5회 누적 시 원문 확인 알림 |
 | `delivery_failed` / `delivery_unverified` | Telegram 연결과 목적지, Hermes 전송 결과 확인 |
 | `cron_operation_failed` | `setup`의 확인 주기와 `hermes cron status` 확인 |

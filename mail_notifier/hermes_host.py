@@ -86,6 +86,50 @@ def _call_boundary_error(exc) -> bool:
     return isinstance(exc, TypeError) and exc.__traceback__ is not None and exc.__traceback__.tb_next is None
 
 
+def _accepts(call, *names) -> bool:
+    """True when *call*'s signature accepts all *names* (keyword-capable).
+
+    Host revisions add and drop optional keywords; asking for one the installed
+    host does not know would fail the whole call. A signature we cannot inspect
+    is treated as accepting nothing, so the caller drops to the next option.
+    """
+    import inspect
+    try:
+        parameters = inspect.signature(call).parameters
+    except (TypeError, ValueError):
+        return False
+    return all(name in parameters or any(p.kind is p.VAR_KEYWORD for p in parameters.values())
+               for name in names)
+
+
+def _completion_text(result) -> str:
+    """Plain assistant text from either result shape, tolerating a bare string."""
+    if isinstance(result, str):
+        return result
+    text = getattr(result, "text", "")
+    return text if isinstance(text, str) else ""
+
+
+def parse_json_text(text):
+    """Best-effort JSON from a model reply, including a fenced code block.
+
+    The text path mirrors the host's own structured parser: models often wrap
+    JSON in ```json fences even when told not to.
+    """
+    import json
+    body = (text or "").strip()
+    if not body:
+        return None
+    if body.startswith("```"):
+        body = body.split("\n", 1)[1] if "\n" in body else ""
+        if body.rstrip().endswith("```"):
+            body = body.rstrip()[:-3]
+    try:
+        return json.loads(body.strip())
+    except (ValueError, TypeError):
+        return None
+
+
 class HermesHost:
     def __init__(self, ctx):
         self.ctx = ctx
@@ -200,27 +244,82 @@ class HermesHost:
             raise HostError("setup_storage_unavailable") from None
 
     def complete_structured(self, payload: dict, *, timeout=45) -> ModelReply:
-        call = getattr(getattr(self.ctx, "llm", None), "complete_structured", None)
-        if not callable(call):
-            # Missing facade: a host API change, not a model problem.
-            raise HostError("incompatible_hermes")
+        """Ask the host for schema-shaped JSON, adapting to the installed API.
+
+        Hermes is an open-source host; plugin revisions and host revisions
+        diverge. Rather than demand one exact signature, use what this host
+        offers, best first:
+
+        1. ``complete_structured`` with only the keywords it accepts.
+        2. ``complete`` (plain text) plus local JSON parsing — the plugin
+           validates the schema itself, so structured support is a convenience,
+           not a requirement.
+        """
+        llm = getattr(self.ctx, "llm", None)
+        structured = getattr(llm, "complete_structured", None)
+        complete = getattr(llm, "complete", None)
         try:
-            result: object = call(
-                **payload, timeout=timeout, max_tokens=1800, purpose="mail-notifier-triage",
-            )
-            usage = getattr(result, "usage", None)
-            values = {name: getattr(usage, name, None) for name in
-                      ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd")}
-            return ModelReply(getattr(result, "parsed", None), values,
-                              getattr(result, "provider", ""), getattr(result, "model", ""))
+            if callable(structured):
+                try:
+                    return self._structured_reply(structured, payload, timeout)
+                except Exception as exc:
+                    if not _call_boundary_error(exc) or not callable(complete):
+                        raise
+                    # This host's structured signature differs; the text path
+                    # can still answer, so fall through instead of failing.
+            if callable(complete):
+                return self._text_reply(complete, payload, timeout)
+            raise HostError("incompatible_hermes")
+        except (HostError, TriageError):
+            raise
         except ValueError:
             raise TriageError("invalid_model_output") from None
         except Exception as exc:
             if _call_boundary_error(exc):
-                # The host rejected our keywords: this plugin does not match the
-                # installed Hermes. Never report it as a model failure.
+                # Neither method accepts our keywords: the installed host is
+                # older or newer than this plugin. Not a model fault.
                 raise HostError("incompatible_hermes") from None
             raise ModelUnavailable(model_failure(exc)) from None
+
+    def _structured_reply(self, call, payload, timeout) -> ModelReply:
+        kwargs = dict(payload)
+        if _accepts(call, "timeout"):
+            kwargs["timeout"] = timeout
+        if _accepts(call, "max_tokens"):
+            kwargs["max_tokens"] = 1800
+        if _accepts(call, "purpose"):
+            kwargs["purpose"] = "mail-notifier-triage"
+        result: object = call(**kwargs)
+        usage = getattr(result, "usage", None)
+        values = {name: getattr(usage, name, None) for name in
+                  ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd")}
+        return ModelReply(getattr(result, "parsed", None), values,
+                          getattr(result, "provider", ""), getattr(result, "model", ""))
+
+    def _text_reply(self, call, payload, timeout) -> ModelReply:
+        instructions = str(payload.get("instructions", ""))
+        schema = payload.get("json_schema")
+        if schema is not None:
+            import json
+            instructions = f"{instructions}\n\nReturn one JSON object matching:\n{json.dumps(schema, ensure_ascii=False)}"
+        parts = [{"type": "text", "text": instructions}]
+        for block in payload.get("input") or ():
+            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                parts.append({"type": "text", "text": block["text"]})
+        messages = [{"role": "user", "content": parts}]
+        try:
+            result = call(messages, timeout=timeout, max_tokens=1800, purpose="mail-notifier-triage")
+        except TypeError as exc:
+            if not _call_boundary_error(exc):
+                raise
+            result = call(messages)
+        usage = getattr(result, "usage", None)
+        values = {name: getattr(usage, name, None) for name in
+                  ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd")}
+        parsed = parse_json_text(_completion_text(result))
+        if parsed is None:
+            raise TriageError("invalid_model_output")
+        return ModelReply(parsed, values, getattr(result, "provider", ""), getattr(result, "model", ""))
 
     def resolve_target(self, target: str) -> str:
         Settings(target=target)
@@ -456,7 +555,10 @@ class HermesHost:
             for method in ("get_config", "set_config", "dispatch_tool"):
                 if not callable(getattr(self.ctx, method, None)):
                     raise HostError()
-            if not callable(getattr(self.ctx.llm, "complete_structured", None)):
+            # Either completion method is enough; complete_structured is the
+            # better one, but the text path parses and validates just as well.
+            llm = getattr(self.ctx, "llm", None)
+            if not any(callable(getattr(llm, name, None)) for name in ("complete_structured", "complete")):
                 raise HostError()
             for module, names in (
                 ("plugins.plugin_storage", ("plugin_data_dir", "plugin_db")),

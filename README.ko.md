@@ -269,8 +269,8 @@ hermes mail-notifier policy set --always-notify-senders boss@example.com
 hermes mail-notifier policy set --clear always_notify_senders
 ```
 
-- 기본 `doctor`: 로컬 설정, 인증 재로드, cron, 백로그 점검
-- `--live`: 활성 메일함 로그인, 합성 메일의 모델 판단, Telegram 진단 메시지 전송까지 실행하며 사용자 메일은 가져오지 않음
+- 기본 `doctor`: 로컬 설정, 인증 재로드, cron, 백로그, 보안 입력 페이지의 HTTPS 설정 여부 점검
+- `--live`: 위 페이지 도달 확인, 활성 메일함 로그인, 합성 메일의 모델 판단, Telegram 진단 메시지 전송까지 실행하며 사용자 메일은 가져오지 않고 페이지 내용도 표시하지 않음
 
 진단 결과에는 오류 코드와 다음 조치를 함께 표시
 

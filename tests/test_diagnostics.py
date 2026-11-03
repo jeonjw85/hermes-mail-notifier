@@ -71,6 +71,36 @@ class DiagnosticsTests(unittest.TestCase):
         model = next(row for row in result["checks"] if row["name"] == "live_model")
         self.assertEqual(model["status"], "error")
 
+    def test_secure_input_page_is_checked_for_configuration_and_reachability(self):
+        self.host.credential_page_url = lambda: ""
+        row = next(item for item in self.module.diagnose(self.host)["checks"] if item["name"] == "credential_page")
+        self.assertEqual((row["status"], row["code"]), ("warning", "credential_page_unavailable"))
+        self.assertIn("credential_page_url", row["next_action"])
+        for value, code in (("http://operator.example/", "credential_page_insecure"),
+                            ("https://user:pass@operator.example/", "credential_page_insecure")):
+            self.host.credential_page_url = lambda value=value: value
+            row = next(item for item in self.module.diagnose(self.host)["checks"] if item["name"] == "credential_page")
+            self.assertEqual(row["code"], code)
+        self.host.credential_page_url = lambda: "https://operator.example/credential/"
+        row = next(item for item in self.module.diagnose(self.host)["checks"] if item["name"] == "credential_page")
+        self.assertEqual((row["status"], row["code"]), ("ok", "ok"))
+
+    def test_live_secure_input_page_reports_unreachable_https_endpoint(self):
+        self.host.credential_page_url = lambda: "https://dead.example/credential/"
+        probes = []
+
+        def unreachable(url, timeout):
+            probes.append((url, timeout))
+            raise OSError("name resolution failed")
+
+        result = self.module.diagnose(self.host, live=True, mailbox_factory=lambda *a, **kw: FakeMailbox(self.account),
+                                      page_probe=unreachable)
+        row = next(item for item in result["checks"] if item["name"] == "live_credential_page")
+        self.assertEqual(row["status"], "error")
+        self.assertEqual(row["code"], "credential_page_unreachable")
+        self.assertEqual(probes[0][0], "https://dead.example/credential/")
+        self.assertNotIn("dead.example", row["next_action"])
+
     def test_next_actions_are_bilingual_without_translating_commands(self):
         cases = (("credential_unavailable", "Check the account", "hermes mail-notifier setup"),
                  ("destination_unavailable", "Save the model", "Hermes"),

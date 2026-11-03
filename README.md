@@ -166,7 +166,7 @@ hermes mail-notifier policy set --always-notify-senders boss@example.com
 hermes mail-notifier policy set --clear always_notify_senders
 ```
 
-Default `doctor` checks local configuration, credential reload, cron and backlog. `--live` additionally logs into enabled mailboxes, classifies a synthetic message and sends a Telegram diagnostic message. It does not fetch user mail. Diagnostic failures include an error code and a suggested next action.
+Default `doctor` checks local configuration, credential reload, cron and backlog, and whether the secure-input page is configured as a trusted HTTPS URL. `--live` additionally reaches that page, logs into enabled mailboxes, classifies a synthetic message and sends a Telegram diagnostic message. It does not fetch user mail or display page content. Diagnostic failures include an error code and a suggested next action.
 
 `history` explicitly displays saved content; `status` and `queue` omit bodies and summaries. Queue mutations require a mail ID or an explicit account filter. Retrying a prepared notification reuses its summary. Home-channel destinations are resolved to concrete chat/topic IDs when prepared; use `retarget` to change pending notifications. Account enable/disable preserves UID checkpoints and pending work.
 

@@ -1,6 +1,8 @@
 """Local operational checks and explicitly requested live probes."""
 
+import urllib.request
 from dataclasses import replace
+from urllib.parse import urlsplit
 
 from .hermes_host import HostError
 from .i18n import resolve_ui_language, text
@@ -12,7 +14,31 @@ from .service import error_code, get_status
 from .triage import triage_message
 
 
+def _credential_page_check(url):
+    """Validate the operator page locally; never fetch it here."""
+    if not url:
+        raise HostError("credential_page_unavailable")
+    parsed = urlsplit(url)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.fragment or "#" in url):
+        raise HostError("credential_page_insecure")
+    return url
+
+
+def _probe_credential_page(url, timeout=5):
+    """Confirm the configured HTTPS page answers; report no page content."""
+    request = urllib.request.Request(url, method="GET", headers={"User-Agent": "hermes-mail-notifier-doctor"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - operator-configured HTTPS only
+            if response.status >= 400:
+                raise HostError()
+    except Exception:
+        raise HostError("credential_page_unreachable") from None
+
+
 def next_action(code, *, language="ko") -> str:
+    if code in {"credential_page_unavailable", "credential_page_insecure", "credential_page_unreachable"}:
+        return text("guidance.credential_page", language)
     if code in {"credential_unavailable", "imap_authentication_failed", "imap_mailbox_unavailable", "invalid_settings"}:
         return text("guidance.account", language)
     if code in {"credentials_not_reloadable", "credential_reload_check_failed", "destination_unavailable"}:
@@ -32,18 +58,18 @@ def next_action(code, *, language="ko") -> str:
     return text("guidance.default", language)
 
 
-def diagnose(host, *, live=False, mailbox_factory=ImapMailbox):
+def diagnose(host, *, live=False, mailbox_factory=ImapMailbox, page_probe=_probe_credential_page):
     if type(live) is not bool:
         raise HostError("invalid_live_option")
     checks, queue = [], {}
     def add(name, status="ok", code="ok"):
         checks.append({"name": name, "status": status, "code": code, "next_action": ""})
     # Keep check records even when a prior component is unavailable.
-    def check(name, callback):
+    def check(name, callback, *, failure="error"):
         try:
             value = callback()
         except Exception as exc:
-            add(name, "error", error_code(exc))
+            add(name, failure, error_code(exc))
         else:
             add(name)
             return value
@@ -54,6 +80,9 @@ def diagnose(host, *, live=False, mailbox_factory=ImapMailbox):
     if settings:
         check("credential_reload", lambda: host.check_environment(settings))
         check("destination", lambda: host.resolve_target(settings.target))
+        # Secure input degrades to CLI password entry, so an unset or unusable
+        # page is a warning; only unreachable live pages are errors.
+        page = check("credential_page", lambda: _credential_page_check(host.credential_page_url()), failure="warning")
         for account in settings.accounts:
             if account.enabled:
                 def credential(account=account):
@@ -84,6 +113,14 @@ def diagnose(host, *, live=False, mailbox_factory=ImapMailbox):
             if account.get("last_error"):
                 add(f"account:{account['account_id']}", "warning", account["last_error"])
     if live and settings:
+        if page:
+            # Only a live opt-in probes the network; the URL itself is never echoed.
+            def live_page():
+                try:
+                    return page_probe(page, timeout=5)
+                except Exception:
+                    raise HostError("credential_page_unreachable") from None
+            check("live_credential_page", live_page)
         for account in settings.accounts:
             if account.enabled:
                 def imap_probe(account=account):

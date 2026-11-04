@@ -388,7 +388,7 @@ Hermes 대화에서도 `mail_notifier_check`, `mail_notifier_status` 도구 사�
 | `incompatible_hermes` / `incompatible_hermes_onboarding` | 설치된 Hermes의 `ctx.llm`에 `complete_structured`도 `complete`도 없음 — 플러그인 LLM 파사드 이전 버전. 둘 중 하나만 있으면 자동 적응 |
 | `invalid_model_output` | 모델 응답이 규격에 맞지 않으면 재시도, 5회 누적 시 원문 확인 알림 |
 | `delivery_failed` / `delivery_unverified` | Telegram 연결과 목적지, Hermes 전송 결과 확인 |
-| `delivery_not_configured` | `<HERMES_HOME>/.env`에 `TELEGRAM_BOT_TOKEN`과 `TELEGRAM_HOME_CHANNEL` 저장. 게이트웨이 프로세스에만 있는 토큰은 플러그인의 새 프로세스에서 보이지 않음 |
+| `delivery_not_configured` | Telegram 자격증명을 어디에서도 찾지 못함. `<HERMES_HOME>/.env`에 `TELEGRAM_BOT_TOKEN`과 `TELEGRAM_HOME_CHANNEL` 저장 |
 | `delivery_no_adapter` | 게이트웨이를 Telegram 플랫폼 연결 상태로 실행 |
 | `delivery_auth_failed` | `hermes gateway setup`으로 봇 토큰 재설정 |
 | `delivery_forbidden` | 봇 재초대 또는 차단 해제, 채널 관리자 권한 확인 |

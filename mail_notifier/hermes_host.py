@@ -21,15 +21,21 @@ if TYPE_CHECKING:
     from .onboarding_store import SetupStore
 
 _MARKER = "Managed by hermes-mail-notifier."
-# Deliberately excludes credentials. check_environment uses this list to prove a
-# fresh child can RELOAD them from the profile; forwarding an ambient token
-# would make that check pass while cron still fails.
+# Deliberately excludes credentials. The cron shim and check_environment use
+# this list to prove a fresh process can RELOAD them from the profile;
+# forwarding an ambient token would make that check pass while cron still failed.
 _CHILD_ENV = frozenset({
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TZ",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
 })
+# A one-shot send runs now, inside the gateway, where the bot token may exist
+# only in this process environment (set by `hermes gateway`, a systemd unit, or
+# a secret manager). Forwarding it is not a credential leak: the child is our
+# own `hermes send` and the value never leaves the machine. Cron is different —
+# it must reload from the profile — so it keeps the strict list above.
+_SEND_ENV = _CHILD_ENV | {"TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL", "TELEGRAM_PROXY"}
 
 
 class HostError(RuntimeError):
@@ -376,8 +382,9 @@ class HermesHost:
             raise HostError("hermes_executable_missing")
         return str(Path(executable).absolute())
 
-    def _child_env(self) -> dict:
-        env = {key: value for key, value in os.environ.items() if key in _CHILD_ENV or key.startswith("LC_")}
+    def _child_env(self, allowed=None) -> dict:
+        allowed = _CHILD_ENV if allowed is None else allowed
+        env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
         env["HERMES_HOME"] = str(self.home())
         return env
 
@@ -463,7 +470,7 @@ class HermesHost:
             result = subprocess.run(
                 [self._executable(), "send", "--to", target, "--file", "-", "--json"],
                 input=text, text=True, encoding="utf-8", capture_output=True,
-                env=self._child_env(), timeout=timeout, check=False,
+                env=self._child_env(_SEND_ENV), timeout=timeout, check=False,
             )
             payload = json.loads(result.stdout)
             if result.returncode or not isinstance(payload, dict) or payload.get("success") is not True:

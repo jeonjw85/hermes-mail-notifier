@@ -244,8 +244,12 @@ class HermesHostTests(unittest.TestCase):
         self.assertEqual(kw["input"], "summary")
         self.assertEqual(kw["env"]["HERMES_HOME"], str(self.profile))
         self.assertNotIn("HERMES_PROFILE", kw["env"])
-        self.assertNotIn("TELEGRAM_BOT_TOKEN", kw["env"])
-        self.assertNotIn("test-only-secret", repr((argv, kw)))
+        # The gateway may hold the bot token only in this process; a one-shot
+        # send must forward it or it cannot deliver at all.
+        self.assertEqual(kw["env"]["TELEGRAM_BOT_TOKEN"], "test-only-secret")
+        # Other profile secrets and the mail password never travel.
+        self.assertNotIn("HERMES_MAIL_A1_APP_PASSWORD", kw["env"])
+        self.assertNotIn("test-only-secret", repr(argv))
         self.assertEqual(kw["timeout"], 30)
 
     def test_environment_preflight_rejects_unreloadable_scoped_credentials(self):
@@ -312,6 +316,29 @@ class HermesHostTests(unittest.TestCase):
                         self.host.check_environment(self.settings)
                     self.assertEqual(caught.exception.code, "credential_reload_check_failed")
                     self.assertNotIn("test-only-token", str(caught.exception))
+
+    def test_send_forwards_an_ambient_bot_token_but_cron_reload_does_not(self):
+        # The gateway may hold the token only in its process environment.
+        # A one-shot send must still work; the cron reload gate must still
+        # refuse to count that ambient value as "reloadable".
+        seen = {}
+
+        def capture(cmd, **kwargs):
+            seen["env"] = kwargs.get("env") or {}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"success": True, "message_id": "9"}), "")
+
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-only-token",
+                                     "TELEGRAM_HOME_CHANNEL": "-100123"}), \
+                patch.object(self.module.subprocess, "run", side_effect=capture):
+            self.host.send("telegram", "summary")
+        self.assertEqual(seen["env"].get("TELEGRAM_BOT_TOKEN"), "test-only-token")
+        self.assertEqual(seen["env"].get("TELEGRAM_HOME_CHANNEL"), "-100123")
+
+        # The cron child keeps the strict list: no ambient credentials, so the
+        # reload gate (which reads the same env) still proves reloadability.
+        self.assertEqual(self.host._child_env().get("TELEGRAM_BOT_TOKEN"), None)
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", self.module._CHILD_ENV)
+        self.assertIn("TELEGRAM_BOT_TOKEN", self.module._SEND_ENV)
 
     def test_delivery_failure_names_the_cause(self):
         # The host already explains itself ("No live adapter...", "Plugin

@@ -249,7 +249,7 @@ The `mail_notifier_check` and `mail_notifier_status` tools are also available in
 | `incompatible_hermes` / `incompatible_hermes_onboarding` | The installed Hermes exposes neither `complete_structured` nor `complete` on `ctx.llm` — the plugin LLM facade predates it; otherwise the plugin adapts to either method |
 | `invalid_model_output` | Invalid model output is retried; five failures produce a review notification |
 | `delivery_failed` / `delivery_unverified` | Telegram connection, destination, and Hermes delivery result |
-| `delivery_not_configured` | Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_HOME_CHANNEL` to `<HERMES_HOME>/.env`; a token only in the gateway process cannot reach the plugin's fresh process |
+| `delivery_not_configured` | No Telegram credentials found anywhere; add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_HOME_CHANNEL` to `<HERMES_HOME>/.env` |
 | `delivery_no_adapter` | Start the gateway with the Telegram platform connected |
 | `delivery_auth_failed` | Re-set the bot token with `hermes gateway setup` |
 | `delivery_forbidden` | Re-add the bot or lift its block; check channel admin rights |

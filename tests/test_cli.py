@@ -123,7 +123,7 @@ class CliTests(unittest.TestCase):
             return self.module.setup_plugin(self.host, read=read, read_secret=lambda prompt: password)
 
     def first_setup(self):
-        self.assertEqual(self.setup_with(["naver", "me@example.com", "no", "no", "yes"]), 0)
+        self.assertEqual(self.setup_with(["", "naver", "me@example.com", "no", "no", "yes"]), 0)
         return self.host.settings.accounts[0]
 
     def test_setup_repeat_preserves_cursor_and_single_schedule_identity(self):
@@ -173,7 +173,8 @@ class CliTests(unittest.TestCase):
 
     def test_failed_probe_is_not_saved_or_enabled(self):
         self.probe_error = True
-        self.assertNotEqual(self.setup_with(["gmail", "me@example.com", "no"]), 0)
+        self.assertNotEqual(self.setup_with(["", "gmail", "me@example.com", "no"]), 0)
+        # Nothing is published, so the stored settings stay at their defaults.
         self.assertEqual(self.host.settings, Settings())
         self.assertEqual(self.host.passwords, {})
         self.assertEqual(self.host.schedule_calls, 0)
@@ -240,7 +241,7 @@ class CliTests(unittest.TestCase):
 
     def test_cron_failure_reports_partial_setup_and_reexecution_recovers(self):
         self.host.cron_failure = True
-        self.assertNotEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "yes"]), 0)
+        self.assertNotEqual(self.setup_with(["", "gmail", "me@example.com", "no", "no", "yes"]), 0)
         self.assertEqual(len(self.host.settings.accounts), 1)
         account_id = self.host.settings.accounts[0].id
         self.assertIn("settings", self.output.getvalue())
@@ -272,13 +273,13 @@ class CliTests(unittest.TestCase):
 
     def test_failed_settings_publish_reports_the_correct_stage(self):
         with patch.object(self.host, "save_settings", side_effect=HostError("settings_save_failed")):
-            self.assertNotEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "yes"]), 0)
+            self.assertNotEqual(self.setup_with(["", "gmail", "me@example.com", "no", "no", "yes"]), 0)
         self.assertIn("settings_save_failed", self.output.getvalue())
         self.assertEqual(self.host.settings.accounts, ())
 
     def test_environment_only_credentials_fail_before_settings_or_schedule_changes(self):
         with patch.object(self.host, "check_environment", side_effect=HostError("credentials_not_reloadable")):
-            self.assertNotEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "yes"]), 0)
+            self.assertNotEqual(self.setup_with(["", "gmail", "me@example.com", "no", "no", "yes"]), 0)
         self.assertEqual(self.host.settings.accounts, ())
         self.assertEqual(self.host.passwords, {})
         self.assertEqual(self.host.schedule_calls, 0)
@@ -366,16 +367,25 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(self.module.run_cli(args, self.host), 0)
                 self.assertEqual(setup.call_args.kwargs["ui_language"], "en")
 
-    def test_new_user_must_confirm_and_defaults_come_from_locale(self):
+    def test_new_user_chooses_language_and_then_confirms(self):
         with patch.dict("os.environ", {"LC_ALL": "en_US.UTF-8", "LC_MESSAGES": "ko_KR", "LANG": "ko_KR"}):
-            self.assertEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "no"]), 1)
+            # Cancelling before publication stores nothing, so the language is
+            # asked again on the retry — the safe behaviour for a first install.
+            self.assertEqual(self.setup_with(["", "gmail", "me@example.com", "no", "no", "no"]), 1)
             self.assertEqual(self.host.load_settings().accounts, ())
             self.assertEqual(self.host.passwords, {})
-            self.assertEqual(self.setup_with(["gmail", "me@example.com", "no", "no", "yes"]), 0)
+            self.assertEqual(self.setup_with(["", "gmail", "me@example.com", "no", "no", "yes"]), 0)
         account = self.host.load_settings().accounts[0]
         self.assertEqual((account.label, account.mailbox), ("me@example.com", "INBOX"))
         self.assertEqual(self.host.load_settings().language, "en")
         self.assertIn("app password", self.output.getvalue().lower())
+
+    def test_korean_choice_is_honoured_even_when_the_locale_is_english(self):
+        with patch.dict("os.environ", {"LC_ALL": "en_US.UTF-8"}):
+            self.assertEqual(self.setup_with(["ko", "gmail", "me@example.com", "no", "no", "yes"]), 0)
+        self.assertEqual(self.host.load_settings().language, "ko")
+        self.assertEqual(self.host.load_settings().ui_language, "ko")
+        self.assertEqual(self.host.settings.language, "ko")
 
 
 if __name__ == "__main__":

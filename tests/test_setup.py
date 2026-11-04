@@ -40,7 +40,7 @@ class SetupRecoveryTests(unittest.TestCase):
                                             mailbox_factory=mailbox, **kwargs)
 
     def test_invalid_fields_are_reentered_without_losing_the_draft(self):
-        self.assertEqual(self.run_setup(["gmial", "gmail", "bad\x01name", "me@example.com", "yes", "Work", "INBOX", "no", "yes"]), 0)
+        self.assertEqual(self.run_setup(["", "gmial", "gmail", "bad\x01name", "me@example.com", "yes", "Work", "INBOX", "no", "yes"]), 0)
         self.assertEqual(self.host.settings.accounts[0].username, "me@example.com")
         self.assertEqual(self.host.settings.accounts[0].label, "Work")
         self.assertEqual(len(self.probes), 2)
@@ -48,7 +48,7 @@ class SetupRecoveryTests(unittest.TestCase):
     def test_password_retry_preserves_other_account_and_never_prints_passwords(self):
         old = replace(Account(**account_data("z1")), enabled=False)
         self.host.settings = replace(self.host.settings, accounts=(old,))
-        answers = ["add", "gmail", "one@example.com", "no",
+        answers = ["", "add", "gmail", "one@example.com", "no",
                    "add", "naver", "two@example.com", "no", "password", "done", "no", "yes"]
         self.assertEqual(self.run_setup(answers, ("first-secret", "wrong", "second-secret")), 0)
         self.assertEqual(self.host.settings.accounts[0], old)
@@ -57,8 +57,30 @@ class SetupRecoveryTests(unittest.TestCase):
         self.assertNotIn("second-secret", self.output.getvalue())
         self.assertEqual(len(self.probes), 5)
 
+    def test_first_run_asks_for_language_and_applies_it_to_both_fields(self):
+        # The default is English, but setup asks once so a Korean user is not
+        # silently given English summaries and English prompts forever.
+        self.assertEqual(self.run_setup(["ko", "gmail", "one@example.com", "no", "no", "yes"]), 0)
+        self.assertEqual(self.host.settings.language, "ko")
+        self.assertEqual(self.host.settings.ui_language, "ko")
+        self.assertTrue(any("언어" in prompt or "language" in prompt.lower() for prompt in self.prompts))
+
+    def test_first_run_accepts_english_and_blank_keeps_the_default(self):
+        for answer, expected in (("en", "en"), ("", "en")):
+            with self.subTest(answer=answer):
+                self.host.settings = replace(self.host.settings, accounts=(), language="en", ui_language="")
+                self.assertEqual(self.run_setup([answer, "gmail", "one@example.com", "no", "no", "yes"]), 0)
+                self.assertEqual(self.host.settings.language, expected)
+                self.assertEqual(self.host.settings.ui_language, expected)
+
+    def test_existing_installation_is_not_asked_again(self):
+        self.host.settings = replace(self.host.settings, language="ko", ui_language="ko")
+        self.assertEqual(self.run_setup(["gmail", "one@example.com", "no", "yes"], account_action="add"), 0)
+        self.assertEqual(self.host.settings.language, "ko")
+        self.assertFalse(any("UI 언어" in prompt or "UI language" in prompt for prompt in self.prompts))
+
     def test_cancel_during_retry_has_no_published_side_effects(self):
-        self.assertEqual(self.run_setup(["gmail", "one@example.com", "no", "cancel"], ("wrong",)), 1)
+        self.assertEqual(self.run_setup(["", "gmail", "one@example.com", "no", "cancel"], ("wrong",)), 1)
         self.assertEqual(self.host.settings.accounts, ())
         self.assertEqual(self.host.passwords, {})
         self.assertEqual(self.host.schedule_calls, 0)
@@ -124,7 +146,7 @@ class SetupRecoveryTests(unittest.TestCase):
         for provider, username in (("gmail", "one@example.com"), ("naver", "two@example.com")):
             draft = service.change(draft.id, owner, draft.revision, action="add", values={"provider": provider, "username": username})
             draft = service.validate_password(draft.id, owner, draft.revision, "lost-at-restart")
-        self.assertEqual(self.run_setup(["no", "yes"], ("first-fresh", "second-fresh")), 0)
+        self.assertEqual(self.run_setup(["", "no", "yes"], ("first-fresh", "second-fresh")), 0)
         self.assertEqual(set(self.host.passwords.values()), {"first-fresh", "second-fresh"})
 
     def test_settings_conflict_can_be_explicitly_restarted_without_overwriting_new_settings(self):
@@ -136,13 +158,13 @@ class SetupRecoveryTests(unittest.TestCase):
         draft = service.change(draft.id, owner, draft.revision, action="settings", values={"target": "telegram:999"})
         self.host.settings = replace(self.host.settings, language="fr")
         self.assertEqual(service.commit(draft.id, owner, draft.revision)["state"], "needs_review")
-        self.assertEqual(self.run_setup(["yes", "gmail", "me@example.com", "no", "no", "yes"]), 0)
+        self.assertEqual(self.run_setup(["", "yes", "gmail", "me@example.com", "no", "no", "yes"]), 0)
         self.assertEqual(self.host.load_settings().language, "fr")
         self.assertEqual(self.host.load_settings().target, "telegram")
 
     def test_paused_setup_can_continue_account_management_without_resuming(self):
         self.host.paused = True
-        self.assertEqual(self.run_setup(["gmail", "me@example.com", "no", "no", "yes"]), 1)
+        self.assertEqual(self.run_setup(["", "gmail", "me@example.com", "no", "no", "yes"]), 1)
         account = self.host.settings.accounts[0]
         self.assertEqual(self.run_setup(["no", "yes", "edit", account.id, "", "", "Renamed", "", "done", "no", "yes"],
                                         ("replacement",)), 1)
@@ -156,7 +178,7 @@ class SetupRecoveryTests(unittest.TestCase):
         from mail_notifier.onboarding_auth import SetupOwner
         self.host.paused = True
         with patch.object(self.host, "send", side_effect=SystemExit), self.assertRaises(SystemExit):
-            self.run_setup(["gmail", "me@example.com", "no", "no", "yes"])
+            self.run_setup(["", "gmail", "me@example.com", "no", "no", "yes"])
         owner = SetupOwner(str(self.host.home()), "cli")
         service = self.module.OnboardingService(self.host)
         draft = service.start(owner)
@@ -193,7 +215,7 @@ class SetupRecoveryTests(unittest.TestCase):
         from mail_notifier.onboarding import OnboardingService
         from mail_notifier.onboarding_auth import SetupOwner
         self.host.cron_failure = True
-        self.assertEqual(self.run_setup(["gmail", "me@example.com", "no", "no", "yes"]), 1)
+        self.assertEqual(self.run_setup(["", "gmail", "me@example.com", "no", "no", "yes"]), 1)
         self.host.cron_failure = False
         self.host.settings = replace(self.host.settings, language="fr", target="telegram:555")
         service = OnboardingService(self.host)

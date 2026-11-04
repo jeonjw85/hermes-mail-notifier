@@ -16,7 +16,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.host = SetupHost(self.temp.name)
         self.account = Account(**account_data())
-        self.host.settings = replace(self.host.settings, accounts=(self.account,), ui_language="ko", max_pending=20, max_cached_bodies=20)
+        self.host.settings = replace(self.host.settings, accounts=(self.account,), ui_language="ko", language="ko", max_pending=20, max_cached_bodies=20)
         self.host.passwords[self.account.id] = "test-only-secret"
         self.store = self.host.open_store()
         self.addCleanup(self.store.close)
@@ -163,12 +163,16 @@ class DiagnosticsTests(unittest.TestCase):
         for code, english, command in cases:
             with self.subTest(code=code):
                 en = self.module.next_action(code, language="en")
-                ko = self.module.next_action(code)
+                ko = self.module.next_action(code, language="ko")
                 self.assertIn(english, en)
                 self.assertNotEqual(en, ko)
                 self.assertIn(command, en)
                 self.assertIn(command, ko)
                 self.assertEqual(self.module.next_action(code, language="fr"), en)
+
+    def test_next_action_defaults_to_english(self):
+        # Callers that omit the language must not get Korean guidance.
+        self.assertEqual(self.module.next_action("no_accounts"), self.module.next_action("no_accounts", language="en"))
 
     def test_guidance_uses_ui_language_but_test_notification_uses_summary_language(self):
         self.host.settings = replace(self.host.settings, ui_language="en", language="ko")

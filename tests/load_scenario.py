@@ -35,7 +35,8 @@ def simulate(*, accounts=50, messages=200):
         with tempfile.TemporaryDirectory() as path:
             definitions = [Account(**account_data(f"a{i}")) for i in range(accounts)]
             host = FakeHost(path, definitions)
-            host.settings = replace(host.settings, max_fetches=100, max_model_calls=100, max_deliveries=100)
+            host.settings = replace(host.settings, language="ko", max_fetches=100,
+                                    max_model_calls=100, max_deliveries=100)
             host.open_store = lambda: ObservedStore(sqlite3.connect(Path(path) / "state.db"), Path(path) / "lock", migration_target="telegram:111")
             boxes = {account.id: FakeMailbox(account) for account in definitions}
             store = host.open_store()

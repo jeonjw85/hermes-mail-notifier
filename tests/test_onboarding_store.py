@@ -163,7 +163,7 @@ class SetupStoreTests(unittest.TestCase):
 
     def test_original_snapshot_and_saved_flag_cannot_be_rewritten(self):
         draft = self.create()
-        for changes in ({"original": Settings(language="en")}, {"original_saved": True}, {"revision": 1}):
+        for changes in ({"original": Settings(language="ko")}, {"original_saved": True}, {"revision": 1}):
             with self.subTest(changes=changes), self.assertRaisesRegex(HostError, "setup_changed_retry"):
                 self.other.cas(replace(draft, **changes), expected_revision=0, now=1001)
         self.assertEqual(self.store.get(draft.id, self.owner), draft)

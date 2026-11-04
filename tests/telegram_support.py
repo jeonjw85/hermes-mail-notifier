@@ -95,7 +95,7 @@ class GatewayHarness:
                     self._cleanup.callback(self._release_manager, manager)
                     manager._discovered = True
                     manifest = PluginManifest(name="hermes-mail-notifier", key="hermes-mail-notifier",
-                                              version="0.2.6", source="project", path=str(ROOT))
+                                              version="0.2.7", source="project", path=str(ROOT))
                     manager._load_plugin(manifest)
                     loaded = manager._plugins[manifest.name]
                     if loaded.error:

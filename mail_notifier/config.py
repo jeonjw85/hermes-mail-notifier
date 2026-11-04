@@ -79,7 +79,7 @@ class Settings:
     accounts: tuple[Account, ...] = ()
     schedule: str = "every 5m"
     target: str = "telegram"
-    language: str = "ko"
+    language: str = "en"
     important_senders: tuple[str, ...] = ()
     ignored_senders: tuple[str, ...] = ()
     important_keywords: tuple[str, ...] = ()

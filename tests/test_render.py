@@ -15,17 +15,17 @@ class RenderTests(unittest.TestCase):
         self.result = triage.TriageResult("work", "notify", "normal", "대응 필요", "계약 확인 요청", "회신", "")
 
     def test_render_includes_reason_priority_and_stable_id(self):
-        text = self.module.render_notification(self.account, self.mail, self.result, mail_id="abc123")
+        text = self.module.render_notification(self.account, self.mail, self.result, mail_id="abc123", language="ko")
         for value in ("대응 필요", "보통", "abc123"):
             self.assertIn(value, text)
 
     def test_notification_has_all_user_facing_fields(self):
-        text = self.module.render_notification(self.account, self.mail, self.result)
+        text = self.module.render_notification(self.account, self.mail, self.result, language="ko")
         for expected in ["개인 메일", "boss@example.com", "계약 확인", "요약", "할 일: 회신", "기한: 명시 없음"]:
             self.assertIn(expected, text)
 
     def test_truncated_or_empty_body_is_explicit(self):
-        text = self.module.render_notification(self.account, replace(self.mail, needs_body_review=True), self.result)
+        text = self.module.render_notification(self.account, replace(self.mail, needs_body_review=True), self.result, language="ko")
         self.assertIn("본문 확인 필요", text)
 
     def test_english_notification_labels_fallbacks_and_review_warning(self):
@@ -60,7 +60,7 @@ class RenderTests(unittest.TestCase):
     def test_unicode_limit_preserves_deadline_and_emoji(self):
         mail = replace(self.mail, subject="🦄" * 3000, sender_name="🦄" * 3000)
         result = replace(self.result, summary="🦄" * 2000, action="🦄" * 1000, deadline="2026-12-31")
-        text = self.module.render_notification(self.account, mail, result)
+        text = self.module.render_notification(self.account, mail, result, language="ko")
         self.assertLessEqual(len(text.encode("utf-16-le")) // 2, 3500)
         self.assertIn("기한: 2026-12-31", text)
         self.assertNotIn("\ufffd", text)

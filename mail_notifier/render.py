@@ -30,7 +30,7 @@ def _field(text: str, budget: int) -> str:
     return "".join(chunks) + "…"
 
 
-def render_notification(account: Account, mail: MailContent, result: TriageResult, *, mail_id="", language="ko") -> str:
+def render_notification(account: Account, mail: MailContent, result: TriageResult, *, mail_id="", language="en") -> str:
     sender = f"{mail.sender_name} <{mail.sender_address}>" if mail.sender_name else mail.sender_address
     priority = text(f"priority.{result.priority}", language)
     category = text(f"category.{result.category}", language)

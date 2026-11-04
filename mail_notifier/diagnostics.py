@@ -36,7 +36,7 @@ def _probe_credential_page(url, timeout=5):
         raise HostError("credential_page_unreachable") from None
 
 
-def next_action(code, *, language="ko") -> str:
+def next_action(code, *, language="en") -> str:
     if code in {"credential_page_unavailable", "credential_page_insecure", "credential_page_unreachable"}:
         return text("guidance.credential_page", language)
     if code in {"credential_unavailable", "imap_authentication_failed", "imap_mailbox_unavailable", "invalid_settings"}:

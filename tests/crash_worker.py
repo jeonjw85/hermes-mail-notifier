@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from mail_notifier.config import Account
+from mail_notifier.config import Account, Settings
 from mail_notifier.service import check_mail
 from mail_notifier.store import Store
 from tests.support import account_data
@@ -15,6 +15,9 @@ from tests.test_service import FakeHost, FakeMailbox
 def main(path, point):
     account = Account(**account_data())
     host = FakeHost(path, [account])
+    # The recovery fixture asserts Korean message text; ask for it explicitly
+    # instead of relying on a default that is English for new installs.
+    host.settings = Settings(accounts=(account,), language="ko")
     box = FakeMailbox(account)
     box.add(101)
     store = host.open_store()

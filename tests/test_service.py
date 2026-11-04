@@ -105,6 +105,9 @@ class ServiceTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.accounts = [Account(**account_data("a1")), Account(**account_data("b2", "daum"))]
         self.host = FakeHost(self.temp.name, self.accounts)
+        # These assertions check Korean notification text; ask for it explicitly
+        # now that new installs default to English.
+        self.host.settings = replace(self.host.settings, language="ko")
         self.boxes = {a.id: FakeMailbox(a) for a in self.accounts}
         self.now = 1000
         store = self.host.open_store()
@@ -471,7 +474,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_rotation_serves_more_than_twenty_accounts(self):
         accounts = [Account(**account_data(f"a{i}")) for i in range(21)]
-        self.host.settings = Settings(accounts=tuple(accounts))
+        self.host.settings = Settings(accounts=tuple(accounts), language="ko", ui_language="ko")
         store = self.host.open_store()
         for account in accounts:
             store.initialize(account, 7, 100)

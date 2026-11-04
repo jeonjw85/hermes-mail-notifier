@@ -23,6 +23,17 @@ def cli_language(settings, explicit=""):
     return resolve_ui_language(explicit=explicit, saved=settings.ui_language, detected=detected)
 
 
+def _ask_language(read):
+    """Ask once on a first install; blank or unrecognised input keeps English."""
+    try:
+        answer = read(text("setup.choose_language", "en"))
+    except (EOFError, KeyboardInterrupt):
+        return ""
+    if not isinstance(answer, str) or not answer.strip():
+        return ""
+    return answer.strip().casefold()[:2] if answer.strip().casefold()[:2] in ("ko", "en") else ""
+
+
 def _password(read_secret, existing=False, *, language="en"):
     if read_secret is getpass.getpass and not sys.stdin.isatty():
         raise HostError("interactive_terminal_required")
@@ -179,9 +190,20 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
     terminal = None
     language = "en"
     try:
-        language = cli_language(host.load_settings(), ui_language)
+        existing = host.load_settings()
+        language = cli_language(existing, ui_language)
         if account_action not in (None, "add", "edit"):
             raise HostError("invalid_setup_action")
+        # Ask once, on the first install that has not chosen a UI language yet.
+        # The saved value is the durable marker; a repeat, repair or account-only
+        # run already has one and keeps it.
+        chosen = ""
+        if not ui_language and account_action is None and not existing.ui_language:
+            chosen = _ask_language(read)
+            language = resolve_ui_language(explicit=chosen) if chosen else language
+            # Record the choice even when it was blank, so the question is asked
+            # once. Without this, an English default would re-prompt forever.
+            chosen = chosen or language
         service = OnboardingService(host, mailbox_factory=mailbox_factory)
         draft = service.start(SetupOwner(str(host.home()), "cli"), detected_language=language)
         terminal = _Terminal(host, service, draft, read, read_secret, language)
@@ -220,7 +242,7 @@ def setup_plugin(host, *, read=input, read_secret=getpass.getpass, mailbox_facto
             else:
                 return terminal.result(preview)
         draft = terminal.draft
-        if ui_language:
+        if ui_language or chosen:
             values = {"ui_language": language}
             if not draft.original_saved:
                 values["language"] = language

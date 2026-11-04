@@ -313,6 +313,42 @@ class HermesHostTests(unittest.TestCase):
                     self.assertEqual(caught.exception.code, "credential_reload_check_failed")
                     self.assertNotIn("test-only-token", str(caught.exception))
 
+    def test_delivery_failure_names_the_cause(self):
+        # The host already explains itself ("No live adapter...", "Plugin
+        # standalone send failed: ...", a bot API error). Collapsing all of it
+        # into delivery_failed leaves the user with "check Telegram", which is
+        # the one thing they already did.
+        cases = {
+            "No live adapter for platform 'telegram'. Is the gateway running with this platform connected?":
+                "delivery_no_adapter",
+            "Plugin standalone send failed: chat not found": "delivery_destination_not_found",
+            "Adapter send failed: Forbidden: bot was blocked by the user": "delivery_forbidden",
+            "Send failed: Error code: 401 - Unauthorized": "delivery_auth_failed",
+            "Send failed: Error code: 429 - Too Many Requests: retry after 30": "delivery_rate_limited",
+            "Send failed: Request timed out": "delivery_timeout",
+            "Platform 'telegram' is not configured. Looked in: /home/x/.hermes/.env (missing), "
+            "/home/x/.hermes/config.yaml (no platforms.telegram block), environment (TELEGRAM_BOT_TOKEN unset)":
+                "delivery_not_configured",
+            "Something nobody classified": "delivery_failed",
+        }
+        for message, code in cases.items():
+            with self.subTest(code=code):
+                output = json.dumps({"error": message})
+                with patch.object(self.module.subprocess, "run",
+                                  return_value=subprocess.CompletedProcess([], 1, output, "")):
+                    with self.assertRaises(self.module.DeliveryError) as caught:
+                        self.host.send("telegram", "summary")
+                self.assertEqual(caught.exception.code, code)
+
+    def test_delivery_guidance_explains_the_stripped_child_environment(self):
+        # send() runs `hermes send` with a minimal env, so a token that exists
+        # only in the gateway process cannot reach it. The code must say so,
+        # rather than sending the user back to "check Telegram".
+        from mail_notifier.diagnostics import next_action
+        guidance = next_action("delivery_not_configured", language="en")
+        self.assertIn(".env", guidance)
+        self.assertIn("TELEGRAM_BOT_TOKEN", guidance)
+
     def test_send_requires_actual_delivery_evidence(self):
         invalid = [{"success": True}, {"success": True, "message_id": "9", "delivered": False},
                    {"success": True, "message_id": "9", "partial_success": True},

@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     from .onboarding_store import SetupStore
 
 _MARKER = "Managed by hermes-mail-notifier."
+# Deliberately excludes credentials. check_environment uses this list to prove a
+# fresh child can RELOAD them from the profile; forwarding an ambient token
+# would make that check pass while cron still fails.
 _CHILD_ENV = frozenset({
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TZ",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
@@ -74,6 +77,33 @@ def model_failure(exc) -> str:
         if any(phrase in body for phrase in phrases):
             return code
     return "model_unavailable"
+
+
+# Delivery failures need the same treatment: "check the destination" is useless
+# when the real cause is a blocked bot, a wrong token or no gateway adapter.
+# Ordered; the first matching phrase wins.
+_DELIVERY_FAILURES = (
+    ("delivery_not_configured", ("is not configured", "looked in:", "bot_token unset", "telegram_bot_token unset",
+                                 "no platforms.", "has no token", "no platforms.telegram block")),
+    ("delivery_no_adapter", ("no live adapter", "is the gateway running", "standalone_sender_fn")),
+    ("delivery_auth_failed", ("401", "unauthorized", "invalidtoken", "invalid token", "bot token", "not authorized",
+                              "python-telegram-bot not installed")),
+    ("delivery_forbidden", ("403", "forbidden", "blocked by the user", "bot was blocked", "not enough rights",
+                            "chat_write_forbidden", "user is deactivated", "bot is not a member")),
+    ("delivery_destination_not_found", ("chat not found", "peer_id_invalid", "user not found", "chat_id is empty",
+                                        "unknown chat", "thread not found", "no deliverable text")),
+    ("delivery_rate_limited", ("429", "too many requests", "retry after", "flood")),
+    ("delivery_timeout", ("timed out", "timeout", "readtimeout", "connecttimeout")),
+)
+
+
+def delivery_failure(message) -> str:
+    """Pick the code for a failed send from the host's own explanation."""
+    body = str(message).lower()
+    for code, phrases in _DELIVERY_FAILURES:
+        if any(phrase in body for phrase in phrases):
+            return code
+    return "delivery_failed"
 
 
 def _call_boundary_error(exc) -> bool:
@@ -437,9 +467,9 @@ class HermesHost:
             )
             payload = json.loads(result.stdout)
             if result.returncode or not isinstance(payload, dict) or payload.get("success") is not True:
-                raise DeliveryError()
+                raise DeliveryError(delivery_failure(payload.get("error") if isinstance(payload, dict) else ""))
             if payload.get("error") or payload.get("partial_success") or payload.get("skipped") or payload.get("delivered") is False:
-                raise DeliveryError()
+                raise DeliveryError(delivery_failure(payload.get("error")))
             message_id = payload.get("message_id")
             if not message_id and isinstance(payload.get("response"), dict):
                 response = payload["response"]
@@ -450,6 +480,8 @@ class HermesHost:
             return {"success": True, "message_id": str(message_id)}
         except DeliveryError:
             raise
+        except subprocess.TimeoutExpired:
+            raise DeliveryError("delivery_timeout") from None
         except Exception:
             raise DeliveryError() from None
 

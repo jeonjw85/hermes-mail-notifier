@@ -80,6 +80,20 @@ def next_action(code, *, language="ko") -> str:
         return text("guidance.storage", language)
     if code in {"delivery_failed", "delivery_unverified"}:
         return text("guidance.delivery", language)
+    if code == "delivery_no_adapter":
+        return text("guidance.delivery_no_adapter", language)
+    if code == "delivery_not_configured":
+        return text("guidance.delivery_not_configured", language)
+    if code == "delivery_auth_failed":
+        return text("guidance.delivery_auth_failed", language)
+    if code == "delivery_forbidden":
+        return text("guidance.delivery_forbidden", language)
+    if code == "delivery_destination_not_found":
+        return text("guidance.delivery_destination_not_found", language)
+    if code == "delivery_rate_limited":
+        return text("guidance.delivery_rate_limited", language)
+    if code == "delivery_timeout":
+        return text("guidance.delivery_timeout", language)
     if code in {"incompatible_hermes", "incompatible_hermes_onboarding", "hermes_executable_missing", "profile_unavailable"}:
         return text("guidance.incompatible", language)
     if code in {"setup_changed_retry", "setup_not_found", "setup_confirmation_required",

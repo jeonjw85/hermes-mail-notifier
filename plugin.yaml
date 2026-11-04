@@ -1,5 +1,5 @@
 name: hermes-mail-notifier
-version: "0.2.4"
+version: "0.2.5"
 description: "Read-only Naver, Daum, and Gmail monitoring with important-email summaries sent to Telegram."
 provides_tools:
   - mail_notifier_check

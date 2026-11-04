@@ -249,6 +249,13 @@ The `mail_notifier_check` and `mail_notifier_status` tools are also available in
 | `incompatible_hermes` / `incompatible_hermes_onboarding` | The installed Hermes exposes neither `complete_structured` nor `complete` on `ctx.llm` — the plugin LLM facade predates it; otherwise the plugin adapts to either method |
 | `invalid_model_output` | Invalid model output is retried; five failures produce a review notification |
 | `delivery_failed` / `delivery_unverified` | Telegram connection, destination, and Hermes delivery result |
+| `delivery_not_configured` | Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_HOME_CHANNEL` to `<HERMES_HOME>/.env`; a token only in the gateway process cannot reach the plugin's fresh process |
+| `delivery_no_adapter` | Start the gateway with the Telegram platform connected |
+| `delivery_auth_failed` | Re-set the bot token with `hermes gateway setup` |
+| `delivery_forbidden` | Re-add the bot or lift its block; check channel admin rights |
+| `delivery_destination_not_found` | Re-select `[telegram]` in `setup` to refresh the home channel |
+| `delivery_rate_limited` | Wait for the Telegram reset |
+| `delivery_timeout` | Check network and gateway state, then retry |
 | `cron_operation_failed` | The polling interval in `setup` and the output of `hermes cron status` |
 | `uidvalidity_changed` | Inspect the mailbox, then `reset` only the affected account |
 | `duplicate_owned_cron_jobs` | Remove duplicate plugin jobs shown by `hermes cron list`, then rerun `setup` |
